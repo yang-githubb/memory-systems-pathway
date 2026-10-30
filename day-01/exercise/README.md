@@ -1,13 +1,13 @@
 # Exercise 1 — SimPy DRAM controller
 
-Spec and starter code: `lessons/day-01-*.md` (Build 1), `day-02-*.md` (Build 2), `day-03-*.md` (Build 3).
+Spec and starter code: `day-01/lesson.md` (Build 1), `day-02/lesson.md` (Build 2), `day-03/lesson.md` (Build 3).
 
-Files to create here: `model.py` (Request, decode, streams), `config.py` or load from `../configs/`, `sim.py` (Bank, Controller, run_stream), `sweep.py`, `test_decode.py`, `test_timing.py`.
+Files to create here: `model.py` (Request, decode, streams), `config.py` or load from `configs/`, `sim.py` (Bank, Controller, run_stream), `sweep.py`, `test_decode.py`, `test_timing.py`.
 Plots expected: `ex1_bw_vs_hitrate.png`, `ex1_latency_vs_depth.png` (git-ignored).
 
 ## Day 1 — done
 
-`uv run pytest exercises/ex1_dram_controller` and `uv run python exercises/ex1_dram_controller/model.py`.
+`uv run pytest day-01/exercise` and `uv run python day-01/exercise/model.py`.
 
 **Random stream, 5 requests, same bank?** One pair: requests 2 and 4 both land in bank group 7, bank 3. The other three are alone. (32 banks, 5 draws: a shared bank is more likely than not, the same birthday-paradox math.)
 

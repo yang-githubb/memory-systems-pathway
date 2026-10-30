@@ -1,7 +1,7 @@
 """Exercise 1, Day 1: request type, address decoder, traffic generators.
 
-No timing yet. Timing (Day 2) comes from exercises/configs/*.yaml; the organization
-constants below are the same values as exercises/configs/ddr5_4800.yaml.
+No timing yet. Timing (Day 2) comes from configs/*.yaml; the organization
+constants below are the same values as configs/ddr5_4800.yaml.
 """
 from dataclasses import dataclass, field
 import random

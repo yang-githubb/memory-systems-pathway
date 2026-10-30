@@ -2,13 +2,13 @@
 
 _Started October 2026. Personal notes and practice pathway._
 
-My own ten-day pathway into memory and interconnect systems: DRAM, controllers, NoCs, bus protocols, SystemC/TLM modeling and the tooling around them. Each day is about 2–3 hours of reading and 2–3 hours of building. The full lectures, practice questions and starter code are in `lessons/` (one file per day); this file is the checklist. The glossary and reading list at the bottom are references.
+My own ten-day pathway into memory and interconnect systems: DRAM, controllers, NoCs, bus protocols, SystemC/TLM modeling and the tooling around them. Each day is about 2–3 hours of reading and 2–3 hours of building. The full lectures, practice questions and starter code are in `day-NN/lesson.md`; this file is the checklist. The glossary and reading list at the bottom are references.
 
 ## Day 1 — What DRAM is, and where your model sits
 
 **Read**
 
-Lecture 1.1–1.3 in [lessons/day-01-dram-and-the-request-path.md](lessons/day-01-dram-and-the-request-path.md): the path a request takes, DRAM cells and the channel → rank → bank → row hierarchy, and why a row-buffer hit costs a third of a conflict.
+Lecture 1.1–1.3 in [day-01/lesson.md](day-01/lesson.md): the path a request takes, DRAM cells and the channel → rank → bank → row hierarchy, and why a row-buffer hit costs a third of a conflict.
 
 ```mermaid
 flowchart LR
@@ -40,7 +40,7 @@ flowchart LR
 
 **Read**
 
-Lecture 2.1–2.3 in [lessons/day-02-timing-and-memory-families.md](lessons/day-02-timing-and-memory-families.md): the command cycle and every timing parameter with DDR5-4800 numbers, DDR5 vs LPDDR5/5x vs HBM3/3E/4, and how to read a datasheet timing table.
+Lecture 2.1–2.3 in [day-02/lesson.md](day-02/lesson.md): the command cycle and every timing parameter with DDR5-4800 numbers, DDR5 vs LPDDR5/5x vs HBM3/3E/4, and how to read a datasheet timing table.
 
 ```mermaid
 flowchart LR
@@ -75,7 +75,7 @@ flowchart LR
 
 **Read**
 
-Lecture 3.1–3.4 in [lessons/day-03-memory-controller.md](lessons/day-03-memory-controller.md): FR-FCFS scheduling, open vs closed page, write draining and refresh, QoS mechanisms, and what the PHY does versus the controller (DFI).
+Lecture 3.1–3.4 in [day-03/lesson.md](day-03/lesson.md): FR-FCFS scheduling, open vs closed page, write draining and refresh, QoS mechanisms, and what the PHY does versus the controller (DFI).
 
 **Build**
 
@@ -92,7 +92,7 @@ Lecture 3.1–3.4 in [lessons/day-03-memory-controller.md](lessons/day-03-memory
 
 **Read**
 
-Lecture 4.1–4.5 in [lessons/day-04-performance-analysis.md](lessons/day-04-performance-analysis.md): Little's law with worked sizing examples, bandwidth- vs latency-bound, the roofline model with an AI-accelerator example, percentiles and tail latency, Amdahl's law.
+Lecture 4.1–4.5 in [day-04/lesson.md](day-04/lesson.md): Little's law with worked sizing examples, bandwidth- vs latency-bound, the roofline model with an AI-accelerator example, percentiles and tail latency, Amdahl's law.
 
 **Build**
 
@@ -110,7 +110,7 @@ Lecture 4.1–4.5 in [lessons/day-04-performance-analysis.md](lessons/day-04-per
 
 **Read**
 
-Lecture 5.1–5.5 in [lessons/day-05-networks-on-chip.md](lessons/day-05-networks-on-chip.md): packets and flits, topologies and bisection bandwidth, XY routing and deadlock, the router pipeline, virtual channels and credits, latency-vs-injection and saturation.
+Lecture 5.1–5.5 in [day-05/lesson.md](day-05/lesson.md): packets and flits, topologies and bisection bandwidth, XY routing and deadlock, the router pipeline, virtual channels and credits, latency-vs-injection and saturation.
 
 ```mermaid
 flowchart TB
@@ -142,7 +142,7 @@ Each node is a router with its own attached block (a core, an accelerator, a mem
 
 **Read**
 
-Lecture 6.1–6.4 in [lessons/day-06-bus-protocols-and-chiplets.md](lessons/day-06-bus-protocols-and-chiplets.md): the five AXI channels, handshake, IDs and reordering; CHI home nodes and snoops; UCIe layers and standard vs advanced packaging; the whole path end to end.
+Lecture 6.1–6.4 in [day-06/lesson.md](day-06/lesson.md): the five AXI channels, handshake, IDs and reordering; CHI home nodes and snoops; UCIe layers and standard vs advanced packaging; the whole path end to end.
 
 **Build**
 
@@ -159,7 +159,7 @@ Lecture 6.1–6.4 in [lessons/day-06-bus-protocols-and-chiplets.md](lessons/day-
 
 **Read**
 
-Lecture 7.1–7.4 in [lessons/day-07-systemc-and-tlm.md](lessons/day-07-systemc-and-tlm.md): why SystemC exists, modules/processes/time in one table, TLM 2.0 initiators, targets, sockets, the generic payload, blocking vs non-blocking transport, and how to read a colleague's model.
+Lecture 7.1–7.4 in [day-07/lesson.md](day-07/lesson.md): why SystemC exists, modules/processes/time in one table, TLM 2.0 initiators, targets, sockets, the generic payload, blocking vs non-blocking transport, and how to read a colleague's model.
 
 **Build**
 
@@ -176,7 +176,7 @@ Lecture 7.1–7.4 in [lessons/day-07-systemc-and-tlm.md](lessons/day-07-systemc-
 
 **Read**
 
-Lecture 8.1–8.5 in [lessons/day-08-timing-styles-and-simulators.md](lessons/day-08-timing-styles-and-simulators.md): LT vs AT vs cycle-accurate, temporal decoupling and the quantum keeper, the four phases, calibration against RTL and silicon, and a Ramulator 2 config explained line by line.
+Lecture 8.1–8.5 in [day-08/lesson.md](day-08/lesson.md): LT vs AT vs cycle-accurate, temporal decoupling and the quantum keeper, the four phases, calibration against RTL and silicon, and a Ramulator 2 config explained line by line.
 
 **Build**
 
@@ -193,7 +193,7 @@ Lecture 8.1–8.5 in [lessons/day-08-timing-styles-and-simulators.md](lessons/da
 
 **Read**
 
-Lecture 9.1–9.4 in [lessons/day-09-design-flow-fpga-cpp.md](lessons/day-09-design-flow-fpga-cpp.md): the design flow stage by stage with who hands what to whom, FPGAs as prototypes, reading a SystemVerilog queue and a waveform, and the C++17 you need for models.
+Lecture 9.1–9.4 in [day-09/lesson.md](day-09/lesson.md): the design flow stage by stage with who hands what to whom, FPGAs as prototypes, reading a SystemVerilog queue and a waveform, and the C++17 you need for models.
 
 ```mermaid
 flowchart LR
@@ -216,7 +216,7 @@ flowchart LR
 
 **Read**
 
-Lecture 10.1–10.4 in [lessons/day-10-tooling-gui-selfcheck.md](lessons/day-10-tooling-gui-selfcheck.md): turning a model into a tool (config, CLI, reproducibility), a complete PySide GUI, Linux/Git/compute-farm habits, and Tcl in thirty minutes.
+Lecture 10.1–10.4 in [day-10/lesson.md](day-10/lesson.md): turning a model into a tool (config, CLI, reproducibility), a complete PySide GUI, Linux/Git/compute-farm habits, and Tcl in thirty minutes.
 
 **Build**
 

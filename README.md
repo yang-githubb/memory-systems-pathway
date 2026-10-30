@@ -7,38 +7,45 @@ Topics: DRAM (DDR5, LPDDR5X, HBM3E/HBM4), memory controllers and scheduling, que
 ## How to use this repo
 
 1. Open [`PLAN.md`](PLAN.md). It is the checklist: ten days, each with **Read**, **Build** and **Can you explain?** boxes, plus a glossary and reading list at the end.
-2. For each day, read the matching chapter in [`lessons/`](lessons/) (about an hour), answer the practice questions on paper, then check the answers at the bottom of the chapter.
-3. Do the build. Starter code is inside each chapter; the finished code lives in [`exercises/`](exercises/).
+2. For each day, read `day-NN/lesson.md` (about an hour), answer the practice questions on paper, then check the answers at the bottom of the chapter.
+3. Do the build. Starter code is inside each chapter; the finished code lives in `day-NN/exercise/`.
 4. Tick the boxes in `PLAN.md` as you go.
 
 | Day | Chapter | What you build |
 | --- | --- | --- |
-| 1 | [DRAM and the request path](lessons/day-01-dram-and-the-request-path.md) | repo, SimPy, address decoder |
-| 2 | [Timing parameters and memory families](lessons/day-02-timing-and-memory-families.md) | FIFO DRAM controller with real timing |
-| 3 | [What a memory controller does](lessons/day-03-memory-controller.md) | FR-FCFS scheduler, page policy, plots, timing tests |
-| 4 | [Performance analysis](lessons/day-04-performance-analysis.md) | two requesters with QoS, latency histograms |
-| 5 | [Networks on chip](lessons/day-05-networks-on-chip.md) | 4×4 mesh simulator |
-| 6 | [Bus protocols and chiplets](lessons/day-06-bus-protocols-and-chiplets.md) | virtual channels, hotspot and transpose traffic |
-| 7 | [SystemC and TLM 2.0](lessons/day-07-systemc-and-tlm.md) | first loosely-timed model (full code) |
-| 8 | [Timing styles and real simulators](lessons/day-08-timing-styles-and-simulators.md) | approximately-timed target, Ramulator 2 run |
-| 9 | [Design flow, FPGAs and C++](lessons/day-09-design-flow-fpga-cpp.md) | C++17 port with tests |
-| 10 | [Tooling, GUI and self-check](lessons/day-10-tooling-gui-selfcheck.md) | CLI, PySide GUI, README, final self-check |
+| 1 | [DRAM and the request path](day-01/lesson.md) | repo, SimPy, address decoder |
+| 2 | [Timing parameters and memory families](day-02/lesson.md) | FIFO DRAM controller with real timing |
+| 3 | [What a memory controller does](day-03/lesson.md) | FR-FCFS scheduler, page policy, plots, timing tests |
+| 4 | [Performance analysis](day-04/lesson.md) | two requesters with QoS, latency histograms |
+| 5 | [Networks on chip](day-05/lesson.md) | 4×4 mesh simulator |
+| 6 | [Bus protocols and chiplets](day-06/lesson.md) | virtual channels, hotspot and transpose traffic |
+| 7 | [SystemC and TLM 2.0](day-07/lesson.md) | first loosely-timed model (full code) |
+| 8 | [Timing styles and real simulators](day-08/lesson.md) | approximately-timed target, Ramulator 2 run |
+| 9 | [Design flow, FPGAs and C++](day-09/lesson.md) | C++17 port with tests |
+| 10 | [Tooling, GUI and self-check](day-10/lesson.md) | CLI, PySide GUI, README, final self-check |
 
 ## Repo layout
 
 ```
 PLAN.md              the ten-day checklist, glossary and reading list
-lessons/             one chapter per day: lectures, practice, answers, starter code
-exercises/           my implementations of the builds (filled in as I go)
-  ex1_dram_controller/   SimPy DRAM controller (days 1–3)
-  ex2_qos/               two-requester QoS study (day 4)
-  ex3_noc/               mesh NoC simulator (days 5–6)
-  ex4_tlm/               SystemC / TLM 2.0 models (days 7–8)
-  ex5_ramulator/         notes and configs for the Ramulator 2 runs (day 8)
-  ex7_gui/               PySide explorer GUI (day 10)
-  ex8_cpp/               C++17 port of exercise 1 (day 9)
-  configs/               YAML timing/organization configs shared by the simulators
+day-NN/
+  lesson.md          the chapter: lectures, practice, answers, starter code
+  exercise/          my build for that day (filled in as I go)
 ```
+
+Exercises that span several days live in the day they start; the later days' `exercise/README.md` points there. The lessons call the exercise folders `ex1_dram_controller` and so on; the mapping is:
+
+| Lesson name | Folder | Days |
+| --- | --- | --- |
+| ex1_dram_controller | day-01/exercise | 1–3 |
+| ex2_qos | day-04/exercise | 4 |
+| ex3_noc | day-05/exercise | 5–6 |
+| ex4_tlm | day-07/exercise | 7–8 |
+| ex5_ramulator | day-08/exercise | 8 |
+| ex8_cpp | day-09/exercise | 9 |
+| ex7_gui | day-10/exercise | 10 |
+
+Shared YAML timing configs are in `day-01/exercise/configs/`.
 
 ## Setup
 
@@ -56,4 +63,4 @@ The timing numbers are typical datasheet values rounded for teaching (DDR5-4800,
 
 ## License
 
-Text and notes: CC BY 4.0. Code in `exercises/`: MIT.
+Text and notes: CC BY 4.0. Code in `day-NN/exercise/`: MIT.
