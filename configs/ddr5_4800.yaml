@@ -1,0 +1,24 @@
+# DDR5-4800-like, one 32-bit sub-channel, one rank. Cycles at 2400 MHz.
+name: ddr5_4800
+clock_ghz: 2.4
+line_bytes: 64
+row_bytes: 8192
+bank_groups: 8
+banks_per_group: 4
+timing:          # cycles
+  tRCD: 40
+  tCL: 40
+  tRP: 40
+  tRAS: 77
+  tRRD: 8
+  tFAW: 32
+  tCCD: 8
+  tWR: 72
+  tWTR: 24
+  tBURST: 8
+  tREFI: 9360
+  tRFC: 708
+policy: frfcfs   # fifo | frfcfs
+page: open       # open | closed
+arrival_gap: 4
+seed: 0

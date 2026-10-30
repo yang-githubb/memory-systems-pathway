@@ -1,0 +1,24 @@
+# LPDDR5X-8533-like, one 16-bit channel. Cycles at the 1067 MHz CK (WCK = 4x).
+name: lpddr5x_8533
+clock_ghz: 1.067
+line_bytes: 64
+row_bytes: 2048
+bank_groups: 4
+banks_per_group: 4
+timing:          # cycles at CK
+  tRCD: 20
+  tCL: 20
+  tRP: 20
+  tRAS: 45
+  tRRD: 8
+  tFAW: 32
+  tCCD: 4
+  tWR: 36
+  tWTR: 12
+  tBURST: 8      # BL32 on 16 bits = 64 B over 8 CK
+  tREFI: 4160
+  tRFC: 224
+policy: frfcfs
+page: open
+arrival_gap: 4
+seed: 0

@@ -1,0 +1,23 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+uv.lock
+# C++ / SystemC
+build/
+*.o
+*.a
+# Simulation outputs
+results/
+*.vcd
+*.fsdb
+*.csv
+*.png
+!docs/**/*.png
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
