@@ -23,6 +23,22 @@ FR-FCFS, one cycle:
   if age(pick's oldest competitor) > AGE_CAP: pick = that one
 ```
 
+The same decision as a picture, one cycle of the scheduler:
+
+```mermaid
+flowchart TD
+    Q0{"Any request whose bank<br/>is <b>ready now</b>?"} -- "no" --> WAIT["wait a cycle"]
+    Q0 -- "yes" --> Q1{"Oldest request older<br/>than the <b>age cap</b>?"}
+    Q1 -- "yes" --> OLD["serve it regardless<br/><i>starvation bound</i>"]
+    Q1 -- "no" --> Q2{"Any ready request a<br/><b>row-buffer hit</b>?"}
+    Q2 -- "yes" --> HIT["oldest hit<br/><i>READ only, tCL</i>"]
+    Q2 -- "no" --> MISS["oldest ready request<br/><i>pays ACT or PRE + ACT</i>"]
+    style HIT fill:#d9f2d9
+    style OLD fill:#fff3cd
+```
+
+Hits beat age everywhere except at the age cap: that one rung is where fairness is allowed to cost bandwidth.
+
 Other policies you will meet: **PAR-BS** (batch requests, schedule a whole batch for bank parallelism), **TCM / BLISS** (classify requesters as streaming vs latency-sensitive and rank them), and simple **round-robin per requester** for fairness. For an IP vendor's controller, the policy is usually FR-FCFS with knobs for age cap, write batching and QoS.
 
 ## Lecture 3.2 — Page policy and write handling
@@ -33,7 +49,34 @@ Other policies you will meet: **PAR-BS** (batch requests, schedule a whole batch
 
 **Adaptive policies** keep a per-bank counter of recent hits and switch. Your exercise today makes the policy a switch so you can measure the crossover yourself.
 
+```mermaid
+flowchart TD
+    RD["READ completes<br/><i>row still in the sense amps</i>"] --> P{"page policy?"}
+    P -- "open" --> KEEP["leave the row open"]
+    P -- "closed" --> AP["auto-precharge now<br/><i>tRP off the critical path</i>"]
+    KEEP --> N1{"next access<br/>same row?"}
+    N1 -- "yes" --> H["<b>hit</b><br/>tCL"]
+    N1 -- "no" --> C["<b>conflict</b><br/>tRP + tRCD + tCL"]
+    AP --> M["next access always a<br/><b>miss</b><br/>tRCD + tCL"]
+    style H fill:#d9f2d9
+    style C fill:#f8d7d7
+    style M fill:#fff3cd
+```
+
+Open page is a bet on locality: it wins a hit or loses a conflict. Closed page gives up the hit to never pay the conflict.
+
 **Writes** are deferred. Reads block a core; writes do not (the core moved on). So the controller puts writes in a separate **write queue**, keeps serving reads, and **drains** the write queue in a batch when it crosses a high-water mark (say 75 % full) until it reaches a low-water mark (say 25 %). Batching pays the **tWTR / tRTW** bus-turnaround cost once per batch instead of once per write. A modeler exposes the two watermarks and the queue depth as parameters.
+
+```mermaid
+stateDiagram-v2
+    [*] --> ServingReads
+    ServingReads --> DrainingWrites : write queue reaches the high-water mark
+    DrainingWrites --> ServingReads : write queue falls to the low-water mark
+    ServingReads : reads go first, writes park in the write queue
+    DrainingWrites : one bus turnaround, then a batch of writes scheduled FR-FCFS among themselves
+```
+
+The gap between the watermarks is the batch size: each trip round the loop costs one tWTR/tRTW turnaround, so a wider gap means fewer turnarounds but a longer stretch in which reads wait.
 
 **Refresh** is the third stream. Every tREFI the controller must issue a REFRESH; it can postpone up to 8 of them (DDR allows a small pull-in/postpone window) to avoid interrupting a burst of hits, then must catch up. **Same-bank** or **per-bank refresh** (DDR5, HBM) refreshes one bank group at a time so the other banks keep working — one of the reasons DDR5 beats DDR4 at the same data rate.
 
@@ -56,6 +99,21 @@ The **controller** is pure digital logic: queues, state machines, schedulers, ad
 
 The two talk through **DFI** (DDR PHY Interface), an industry-standard set of signals: the controller presents commands and write data a fixed number of cycles ahead; the PHY returns read data a fixed number of cycles later. The PHY is in effect a **pipeline with fixed latency** (typically 10–20 controller clocks each way) plus a maximum data rate. That is how a performance model treats it: add a constant, cap the bandwidth.
 
+```mermaid
+flowchart LR
+    CTRL["<b>Controller</b><br/>digital RTL<br/>queues, scheduler, mapping, ECC<br/><i>ports between foundries</i>"]
+    PHY["<b>PHY</b><br/>mixed-signal<br/>SerDes, DLLs, equalizers, drivers<br/><i>tied to one process node</i>"]
+    DRAM["DRAM pins"]
+    CTRL -- "DFI: command + write data<br/>presented tphy_wrlat early" --> PHY
+    PHY -- "DFI: read data returned<br/>tphy_rdlat later" --> CTRL
+    PHY -- "DQ, DQS, CA" --> DRAM
+    DRAM --> PHY
+    style CTRL fill:#dbe9ff
+    style PHY fill:#fff3cd
+```
+
+Everything that decides *order* lives in the left box; the right box is a fixed-latency pipe each way plus a bandwidth cap.
+
 Why this matters at an IP vendor: such a company sells the controller and the PHY as separate but matched IP. Customers ask "what latency do I get through your controller + PHY at 8533 MT/s with this traffic?" — a question your models answer.
 
 ## Lecture 3.5 — Anatomy of a memory controller
@@ -73,6 +131,47 @@ Walk through a controller from the SoC side to the PHY side. Every block below i
 9. **ECC/RAS engine.** Generates and checks ECC, performs read-modify-write, logs errors, scrubs.
 10. **Command/data path to DFI.** Assembles the command for the PHY with the correct DFI timing (commands must be presented a fixed number of cycles before they appear on the pins) and manages the read-data return pipeline and write-data send pipeline.
 11. **Register interface (APB).** Hundreds of configuration registers: all timing parameters, mapping, policy knobs, QoS tables, power thresholds. The datasheet's register map is effectively the list of model parameters.
+
+The same eleven blocks as a data-flow picture, SoC side on the left, PHY on the right:
+
+```mermaid
+flowchart LR
+    subgraph S1["SoC side"]
+        P0["AXI port 0<br/>FIFO, IDs, QoS"]
+        P1["AXI port 1<br/>FIFO, IDs, QoS"]
+    end
+    ARB["port arbiter"]
+    MAP["address decoder<br/>+ mapper<br/><i>ch / rank / bg / bank / row / col</i>"]
+    subgraph S2["Controller core"]
+        CQ["command queue CAM<br/><i>bank, row, age, priority</i>"]
+        WQ["write queue +<br/>write data buffer"]
+        SCH["<b>scheduler</b><br/>per-bank, then global"]
+        BSM["bank state machines<br/>+ timing checkers<br/><i>ready flags</i>"]
+        REF["refresh engine"]
+        PWR["power manager"]
+        ECC["ECC / RAS"]
+    end
+    DFI["command + data path<br/>to DFI"]
+    PHYB["PHY"]
+    APB["APB registers<br/><i>timings, mapping, policy, QoS</i>"]
+    P0 --> ARB
+    P1 --> ARB
+    ARB --> MAP
+    MAP --> CQ
+    MAP --> WQ
+    CQ --> SCH
+    WQ --> SCH
+    BSM -- "legal now?" --> SCH
+    REF -- "REF due" --> SCH
+    PWR --> SCH
+    SCH --> ECC
+    ECC --> DFI
+    DFI --> PHYB
+    APB -. "configures" .-> SCH
+    style SCH fill:#dbe9ff
+```
+
+The scheduler sits in the middle: every other block either feeds it candidates or tells it what is legal this cycle.
 
 **Clocking.** The controller core usually runs at a fraction of the DRAM clock (1:2 or 1:4 — DFI **frequency ratio** mode), issuing up to 2 or 4 commands per core cycle. A DDR5-6400 controller at 1:4 runs at 800 MHz core clock, which is what makes the logic synthesizable. The ratio affects latency granularity and is a parameter in your model.
 
@@ -93,6 +192,22 @@ In commercial IP you will find FR-FCFS with: an age cap, a per-bank hit cap, rea
 
 **Command-bus arbitration.** Even when several banks are ready, only one command per cycle (per sub-channel) can issue. Priority order typical in hardware: refresh (when overdue) > precharge for a pending conflict > activate for the oldest miss > column command for a ready hit. Reversing the last two changes the latency/bandwidth balance; expose it as a switch.
 
+```mermaid
+flowchart TD
+    Q1{"refresh overdue?"} -- "yes" --> REF["issue REF"]
+    Q1 -- "no" --> Q2{"PRE needed for a<br/>pending conflict?"}
+    Q2 -- "yes" --> PRE["issue PRECHARGE"]
+    Q2 -- "no" --> Q3{"ACT legal for the<br/>oldest miss?"}
+    Q3 -- "yes" --> ACT["issue ACTIVATE"]
+    Q3 -- "no" --> Q4{"column command<br/>for a ready hit?"}
+    Q4 -- "yes" --> COL["issue RD or WR"]
+    Q4 -- "no" --> NOP["command bus idle<br/>this cycle"]
+    style REF fill:#f8d7d7
+    style COL fill:#d9f2d9
+```
+
+ACT before column keeps more banks busy (bandwidth later); column before ACT finishes the request that is already open (latency now).
+
 ## Lecture 3.7 — Page policy in detail and the adaptive variants
 
 **Timer-based open page.** Keep the row open for T cycles after the last access; precharge if no new hit arrives. T = 0 is closed page; T = ∞ is pure open page. Many controllers implement exactly this with T programmable (e.g. 0–255 cycles).
@@ -101,11 +216,36 @@ In commercial IP you will find FR-FCFS with: an age cap, a per-bank hit cap, rea
 
 **Queue-aware (look-ahead) policy.** Before deciding to precharge, scan the command queue: if any pending request targets the open row, keep it open; if pending requests target a different row in this bank, precharge now. This is the best practical policy and needs the CAM structure of the queue. It converts the page-policy question into a scheduling question, which is why the two are discussed together.
 
+```mermaid
+flowchart TD
+    A["access to bank B done,<br/>row R still open"] --> Q1{"queue holds a<br/>request to row R?"}
+    Q1 -- "yes" --> KEEP["keep open<br/><i>next one is a hit</i>"]
+    Q1 -- "no" --> Q2{"queue holds a request<br/>to another row in B?"}
+    Q2 -- "yes" --> PRE["precharge now<br/><i>conflict becomes a miss</i>"]
+    Q2 -- "no" --> T["fall back to the timer<br/>or hit-history counter"]
+    style KEEP fill:#d9f2d9
+    style PRE fill:#fff3cd
+```
+
 **Write-side policy.** During a write drain, open-page is almost always right (writes are batched by row already).
 
 ## Lecture 3.8 — Refresh and power management in detail
 
 **All-bank refresh (REFab).** One command refreshes a slice of rows in every bank; the rank is unavailable for tRFC (295 ns on a 16 Gb DDR5 die). Must be issued every tREFI on average; the controller may postpone up to 8 (DDR5: **tREFI window** rules) so that a burst of hits can finish, then catch up with back-to-back refreshes. Postponing improves latency distribution for bursty traffic; pulling in (issuing early during idle) hides refresh cost on low-utilization systems.
+
+```mermaid
+flowchart TD
+    T["tREFI timer expires"] --> Q1{"rank idle?"}
+    Q1 -- "yes" --> GO["issue REF now<br/><i>rank blocked for tRFC</i>"]
+    Q1 -- "no" --> Q2{"postponed fewer<br/>than 8 so far?"}
+    Q2 -- "yes" --> POST["postpone<br/><i>let the hit burst finish</i>"]
+    Q2 -- "no" --> MUST["REF now, then catch up<br/>back-to-back<br/><i>long stall</i>"]
+    POST -- "next tREFI" --> T
+    style GO fill:#d9f2d9
+    style MUST fill:#f8d7d7
+```
+
+Postponing moves the refresh cost from the middle of a burst to its end; the price is a catch-up stall of several tRFC when the 8-deep window runs out.
 
 **Same-bank / per-bank refresh (REFsb, DDR5 and HBM).** Refresh one bank (or one bank in each bank group) at a time for tRFCsb (about 130 ns), while others serve traffic. Costs more commands and scheduler complexity; wins 3–5 % bandwidth and much better tail latency. The scheduler must avoid the bank being refreshed, which is one more ready-flag.
 
@@ -129,6 +269,24 @@ In commercial IP you will find FR-FCFS with: an age cap, a per-bank hit cap, rea
 - **Deadline / latency targets**: a class carries a target; the scheduler raises its priority as the deadline approaches; knob: target per class, escalation curve.
 - **Queue reservation**: entries reserved per class so a flood from one source cannot block admission of others; knob: reserved entries per class.
 - **Read/write separation per class**: e.g. allow display reads to bypass a write drain.
+
+How those mechanisms stack on the path of one request:
+
+```mermaid
+flowchart LR
+    IN["request arrives<br/>AXI QoS 0..15 + urgency"] --> CLS["class table<br/><i>QoS value to traffic class</i>"]
+    CLS --> RES{"reserved queue entry<br/>free for this class?"}
+    RES -- "no" --> BP["back-pressure the port"]
+    RES -- "yes" --> TOK{"token bucket<br/>has tokens?"}
+    TOK -- "no" --> HOLD["ineligible until refill"]
+    TOK -- "yes" --> EFF["effective priority =<br/>class level + aging<br/>+ deadline escalation"]
+    EFF --> SCH["scheduler<br/><i>highest priority first,<br/>FR-FCFS within a level</i>"]
+    style SCH fill:#dbe9ff
+    style BP fill:#f8d7d7
+    style HOLD fill:#fff3cd
+```
+
+Admission, eligibility and priority are three separate knobs; only the last one changes which ready command wins, so only the last one costs row hits.
 
 **Measuring QoS.** Report, per class: p50/p99 latency, achieved bandwidth, and deadline-miss rate, under a defined mix. The industry way to present a QoS result is a plot of one class's p99 latency against the aggressor's offered bandwidth — "the CPU stays under 500 ns until the GPU exceeds 80 % of peak". Your Day 4 exercise produces exactly this plot.
 
@@ -191,6 +349,22 @@ def pick(self):
 ```
 
 **2. Add page policy.** Give `Controller` a `page="open"|"closed"` argument. In `run()`, after the burst, if `page == "closed"` set `b.open_row = None` and `b.ready_at = env.now + max(T["tRP"], T["tCCD"])` (auto-precharge in the background). Count that as neither hit nor conflict next time: it will be a miss.
+
+The per-bank state your `Controller` now tracks, with both page policies on one picture:
+
+```mermaid
+stateDiagram-v2
+    [*] --> Closed
+    Closed --> Open : ACTIVATE, open_row = row, READ legal after tRCD
+    Open --> Open : READ to open_row, hit, tCL
+    Open --> Precharging : READ to a different row, conflict, PRECHARGE first
+    Open --> Closed : READ with auto-precharge, page = closed, ready_at = now + tRP
+    Precharging --> Closed : tRP elapsed, open_row = None
+    Closed : open_row is None, next access is a miss
+    Open : one row in the sense amps
+```
+
+The open-page path is the self-loop on `Open`; the closed-page switch replaces it with the direct return to `Closed`, which is why a closed-page bank never pays tRP on the critical path.
 
 **3. Add the row-hit-rate sweep.** Create `ex1_dram_controller/sweep.py`:
 

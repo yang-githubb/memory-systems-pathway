@@ -48,6 +48,25 @@ Each "must wait" is a **timing parameter**: a minimum number of clock cycles bet
 | tREFI | how often a REFRESH must be issued | 3.9 µs (normal) | — |
 | tRFC | how long one REFRESH blocks the rank | about 295 ns (16 Gb die) | — |
 
+The same parameters laid on one bank's timeline, for a row-buffer miss at DDR5-4800 (cycle numbers at 2400 MHz):
+
+```mermaid
+sequenceDiagram
+    participant C as Controller
+    participant B as Bank 3
+    C->>B: cycle 0, ACTIVATE row 5
+    Note over C,B: wait tRCD = 40 cycles, row settles into the sense amplifiers
+    C->>B: cycle 40, READ column 12
+    Note over C,B: tRAS = 77 cycles since ACTIVATE, restore finished
+    C->>B: cycle 77, PRECHARGE
+    Note over C,B: tCL = 40 cycles after the READ
+    B-->>C: cycles 80 to 88, data burst, BL16 = 8 bus cycles
+    Note over C,B: tRP = 40 cycles after PRECHARGE
+    C->>B: cycle 117, next ACTIVATE, tRC = tRAS + tRP
+```
+
+The precharge may overlap the data burst because by then the data has already left the sense amplifiers for the output pipeline; so the request's own latency is tRCD + tCL + burst = 88 cycles, but the bank is only free for a new row every tRC = 117 cycles.
+
 You do not need to memorize these. You need to know **which one bites in which situation**:
 
 - Random traffic → every access is ACT + RD + PRE, so **tRC** (48 ns per access per bank) is the ceiling. With 32 banks you can have 32 of these in flight, which is how random bandwidth is still usable.
@@ -55,6 +74,50 @@ You do not need to memorize these. You need to know **which one bites in which s
 - Many banks opened quickly → **tFAW** and **tRRD** throttle you; four activates per 13 ns per rank.
 - Mixed reads and writes → every direction change costs **tWTR**; controllers batch writes to avoid paying it often (Day 3).
 - Everything → **refresh** removes tRFC/tREFI = 295 ns / 3900 ns ≈ 7.5 % of the time from every rank, more on bigger dies.
+
+Three of those limits as pictures. First, activates across banks of one rank:
+
+```mermaid
+flowchart LR
+    A0["ACT bank 0<br/>cycle 0"] -- "tRRD_S = 8" --> A1["ACT bank 4<br/>cycle 8"]
+    A1 -- "tRRD_S = 8" --> A2["ACT bank 8<br/>cycle 16"]
+    A2 -- "tRRD_S = 8" --> A3["ACT bank 12<br/>cycle 24"]
+    A3 -- "tRRD_S = 8" --> W{"four ACTs already<br/>inside the tFAW window<br/>of 32 cycles?"}
+    W -- "yes, hold until the window<br/>that opened at cycle 0 closes" --> A4["ACT bank 16<br/>cycle 32 at the earliest"]
+    style W fill:#fff3cd
+```
+
+tRRD spaces consecutive activates; tFAW is a sliding window that counts them. With these DDR5-4800 numbers tFAW = 4 × tRRD_S, so both limits land on cycle 32, but on a part where tFAW is longer than four tRRD gaps the window is what stalls the fifth activate. Either way a rank opens at most four rows per 13.3 ns.
+
+Second, the bus turnaround from a write to a read:
+
+```mermaid
+sequenceDiagram
+    participant C as Controller
+    participant D as DRAM
+    C->>D: WRITE bank 2
+    Note over C,D: tCWL, then the controller drives 8 cycles of write data
+    Note over C,D: tWTR = 24 cycles, bus idle, write completes inside the chip, drivers swap direction
+    C->>D: READ bank 7
+    Note over C,D: tCL = 40 cycles
+    D-->>C: 8 cycles of read data
+```
+
+The 24 idle cycles are paid whichever bank the read targets, because the resource that changes direction is the shared data bus; this is why controllers drain writes in batches.
+
+Third, refresh stealing time from a rank:
+
+```mermaid
+flowchart LR
+    R1["REFRESH<br/>tRFC = 708 cycles<br/><i>rank blocked</i>"] --> U1["normal traffic<br/>8652 cycles"]
+    U1 --> R2["REFRESH<br/>708 cycles"] --> U2["normal traffic<br/>8652 cycles"] --> R3["… every tREFI = 9360 cycles"]
+    style R1 fill:#f8d7d7
+    style R2 fill:#f8d7d7
+    style U1 fill:#d9f2d9
+    style U2 fill:#d9f2d9
+```
+
+On average 708 ÷ 9360 ≈ 7.6 % of the rank's time is gone, but a request that arrives just as REFRESH issues waits the full 708 cycles, so refresh shows up as a tail in the latency histogram rather than as a shift of the mean.
 
 **Burst and peak bandwidth.** DDR5 bursts are 16 transfers long (BL16). Each transfer moves the sub-channel width, 32 bits = 4 bytes, so one burst = 64 bytes and takes 16 transfers ÷ 2 transfers per clock = 8 clocks = 3.3 ns. Peak bandwidth per sub-channel = 4800 MT/s × 4 B = 19.2 GB/s; per 64-bit DIMM (two sub-channels) = 38.4 GB/s. Real sustained bandwidth is 70–90 % of that on streaming workloads and far lower on random ones — the gap is what your model measures.
 
@@ -73,6 +136,24 @@ They are all DRAM with the same cell, the same ACT/RD/PRE cycle and roughly the 
 | Special features | on-die ECC, same-bank refresh, two sub-channels | deep power-down, data-copy modes, 16-bit channels for fine-grained access | stacked dies with TSVs, pseudo-channels, refresh per bank, ECC |
 | What a modeler changes | rank count, channel count, timings | channel count, power states | stack count, channel interleaving, pseudo-channel scheduling |
 
+The same three families drawn as wires: how many, how fast, how far.
+
+```mermaid
+flowchart TD
+    subgraph S1["DDR5 DIMM"]
+        D1["CPU memory controller"] -- "centimeters of PCB trace" --> D2["2 sub-channels × 32 bits<br/>4800–8800 MT/s per pin<br/><b>38–70 GB/s</b>"]
+    end
+    subgraph S2["LPDDR5X package"]
+        L1["SoC controller"] -- "millimeters, soldered" --> L2["4–8 channels × 16 bits<br/>6400–8533 MT/s per pin<br/><b>50–135 GB/s</b>"]
+    end
+    subgraph S3["HBM3E stack"]
+        H1["accelerator controller<br/><i>one slice per channel</i>"] -- "micrometers across<br/>a silicon interposer" --> H2["16 channels × 64 bits = 1024 bits<br/>each as 2 × 32-bit pseudo-channels<br/>9.6 Gb/s per pin<br/><b>1.2 TB/s</b>"]
+        H2 --- H3["8–16 DRAM dies on a base die<br/>joined by TSVs"]
+    end
+```
+
+Per-pin rate differs by about 2× across the row; pin count differs by 16×, and the pin count is set by how far the signal has to travel.
+
 **Worked bandwidth check, HBM3E.** 1024 pins × 9.6 Gb/s = 9830 Gb/s = 1229 GB/s ≈ 1.2 TB/s per stack. Eight stacks around a GPU give about 9.8 TB/s, which is why HBM3E is the memory on every large AI accelerator. Notice the rate per pin is only about twice DDR5; the bandwidth comes from the width (1024 vs 64 pins). That is possible only because the stack sits micrometers away on an interposer, so each wire can be tiny and there can be thousands of them.
 
 **HBM4** doubles the interface to 2048 bits per stack and lowers the per-pin rate at first, with a new base die; vendors now ship HBM4/HBM3E combo PHYs that support both generations from one design.
@@ -86,6 +167,17 @@ If you open a Micron DDR5 datasheet you will find a table labelled "Speed bin" o
 1. Always convert to the clock your model uses. If tRCD is given as 16 ns and the clock is 2400 MHz, that is 16 × 2.4 = 38.4 → round **up** to 39 or 40 cycles; the standard always rounds up.
 2. Note which parameters are **per bank** (tRCD, tRP, tRAS, tRC), **per bank group** (tCCD_L, tRRD_L), **per rank** (tFAW, tRFC) and **per channel** (bus turnaround). Your state machines must track them at the right level.
 3. Write the values you choose into a single config file. Every plot you make should say which config produced it.
+
+Habit 2 as a picture: each parameter is a timer on the level that owns the shared resource.
+
+```mermaid
+flowchart TD
+    CH["<b>Channel</b><br/>tWTR, tRTRS, rank switches<br/><i>one data bus, one direction at a time</i>"] --> RK["<b>Rank</b><br/>tFAW, tRFC<br/><i>shared power delivery and refresh</i>"]
+    RK --> BG["<b>Bank group</b><br/>tCCD_L, tRRD_L<br/><i>shared internal prefetch path</i>"]
+    BG --> BK["<b>Bank</b><br/>tRCD, tRP, tRAS, tRC, tWR<br/><i>one row buffer</i>"]
+```
+
+A `Bank` object cannot see tFAW because it does not know what the other banks did, so the model needs a counter at rank level as well; that is exactly the gap listed under "known simplifications" in today's Build.
 
 ## Lecture 2.4 — The DDR interface: what actually travels on the pins
 
@@ -111,6 +203,22 @@ If you open a Micron DDR5 datasheet you will find a table labelled "Speed bin" o
 
 The pattern: cell speed is flat, so each generation doubles the interface rate by deepening prefetch or splitting channels, and pays for it with more complex signalling (ODT, leveling, DFE). **Bank groups** (DDR4+) exist because the internal prefetch path is shared: back-to-back column accesses to the same group must wait tCCD_L (the internal path is busy) while different groups can go at tCCD_S. A scheduler that alternates bank groups runs faster, and a model that ignores the S/L distinction overestimates bandwidth on bursty traffic.
 
+```mermaid
+flowchart LR
+    subgraph G1["same bank group"]
+        S1["RD bank 0, group 0<br/>cycle 0"] -- "tCCD_L = 16" --> S2["RD bank 1, group 0<br/>cycle 16"]
+    end
+    subgraph G2["alternating bank groups"]
+        A1["RD group 0<br/>cycle 0"] -- "tCCD_S = 8" --> A2["RD group 1<br/>cycle 8"]
+        A2 -- "tCCD_S = 8" --> A3["RD group 2<br/>cycle 16"]
+    end
+    style S2 fill:#f8d7d7
+    style A2 fill:#d9f2d9
+    style A3 fill:#d9f2d9
+```
+
+A burst occupies the bus for 8 cycles, so tCCD_S = 8 keeps the bus full while tCCD_L = 16 leaves it half empty: a stream that stays inside one bank group runs at 50 % of peak.
+
 ## Lecture 2.6 — LPDDR5 and LPDDR5X in depth
 
 Low-power DDR is the memory of phones, laptops, cars and increasingly edge-AI and some servers (Apple M-series, NVIDIA Grace). What makes it different:
@@ -123,6 +231,21 @@ Low-power DDR is the memory of phones, laptops, cars and increasingly edge-AI an
 - **Link ECC and write-X.** LPDDR5 adds optional link ECC on the data bus and a **write-X** command that writes all-ones or all-zeros without transferring data (memory clearing at zero bandwidth cost).
 - **Bank modes.** 16-bank, 8-bank or bank-group modes, selectable; another modeling knob.
 
+The power states as the state machine the controller's power manager walks:
+
+```mermaid
+stateDiagram-v2
+    [*] --> Active
+    Active --> ActivePowerDown : idle for a short while
+    ActivePowerDown --> Active : command arrives, fast exit
+    Active --> SelfRefresh : idle longer, DRAM refreshes itself, controller clock may stop
+    SelfRefresh --> Active : exit costs a few hundred ns plus WCK resync
+    SelfRefresh --> DeepSleep : idle for a long time
+    DeepSleep --> Active : slowest exit
+```
+
+Deeper states burn less background power and cost more to leave; the idle threshold for each transition is the knob, and a wrong setting shows up either in the energy number or as a bump in the latency histogram.
+
 Typical phone configuration: 4 × 16-bit channels of LPDDR5X-8533 = 68 GB/s; a laptop with 8 channels = 136 GB/s; NVIDIA Grace with 32 channels = about 500 GB/s. The per-channel bandwidth is small, so **interleaving across channels** and **small-granularity access** (32 B) matter more than for DDR5.
 
 ## Lecture 2.7 — HBM in depth
@@ -130,6 +253,16 @@ Typical phone configuration: 4 × 16-bit channels of LPDDR5X-8533 = 68 GB/s; a l
 **Structure.** An HBM stack is 4, 8, 12 or 16 DRAM dies stacked on a **base (logic) die**, connected vertically by **through-silicon vias (TSVs)** — thousands of them per die. The base die holds the PHY-side logic, test logic and, in HBM4, more of the controller functions. The stack sits on a **silicon interposer** (CoWoS at TSMC, I-Cube at Samsung) next to the compute die; the interposer carries the 1024 (HBM3) or 2048 (HBM4) data signals plus command, clock and power over a few millimeters at 25–55 µm bump pitch.
 
 **Channels.** HBM3: 16 independent 64-bit channels per stack, each split into two 32-bit **pseudo-channels** sharing the channel's command bus but with separate banks and row buffers. Each pseudo-channel has 4 bank groups × 4 banks, so a stack exposes 32 pseudo-channels × 16 banks = 512 banks. Burst is BL8 on 32 bits = 32 B, so a 64 B line is two bursts or two pseudo-channel accesses; many controllers map one cache line per pseudo-channel burst pair. HBM4 doubles channels to 32 (64 pseudo-channels) per stack with 2048 bits.
+
+```mermaid
+flowchart TD
+    ST["HBM3 stack<br/>1024 data bits"] --> CHn["16 channels × 64 bits<br/><i>each with its own command bus</i>"]
+    CHn --> PC["2 pseudo-channels × 32 bits per channel<br/><i>share the command bus, own banks and row buffers</i>"]
+    PC --> BG["4 bank groups × 4 banks<br/>= 16 banks per pseudo-channel"]
+    BG --> TOT["32 pseudo-channels × 16 banks = <b>512 banks per stack</b><br/>BL8 × 32 bits = 32 B per burst"]
+```
+
+Compare one DDR5 sub-channel: 32 banks behind one 32-bit bus. A stack is 32 such buses, each with half the banks and half the burst, so the scheduler is really 32 small controllers running side by side.
 
 **Speeds.** HBM2E 3.6 Gb/s per pin (460 GB/s per stack); HBM3 6.4 Gb/s (819 GB/s); HBM3E 8–9.6 Gb/s (1.0–1.2 TB/s); HBM4 initially about 8 Gb/s on 2048 bits (about 2 TB/s). Per-pin rate rises slowly because the interposer wires are short but numerous; the width is where growth comes from.
 
@@ -201,6 +334,18 @@ Read the bottom three rows together: HBM has the same array timings as DDR (same
 ## Build 2 — Exercise 1, part 1: a FIFO controller with real timing
 
 Add to `ex1_dram_controller/model.py`. The idea: each bank is a tiny state machine; the controller process pulls requests from a queue in arrival order (FIFO) and issues the commands a bank needs, waiting the right number of cycles between them. The data bus is a shared resource so bursts cannot overlap.
+
+The bank state machine the code below implements:
+
+```mermaid
+stateDiagram-v2
+    [*] --> Closed
+    Closed --> Open : miss, ACTIVATE, record act_at, wait tRCD = 40
+    Open --> Open : hit, READ or WRITE, bus busy tBURST = 8, then tCCD = 8
+    Open --> Closed : conflict, PRECHARGE once act_at + tRAS has passed, wait tRP = 40
+```
+
+In `sim.py` the state is just `open_row` (`None` means Closed) plus the two timestamps `ready_at` and `act_at`; a conflict walks Open → Closed → Open inside one pass through `run()`, and the three stats counters sit on the three arrows.
 
 **Config**
 

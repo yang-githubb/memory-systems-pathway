@@ -9,6 +9,18 @@ About 2 hours of reading, 3 hours of building. Answers at the bottom.
 | Loosely-timed (LT) | one blocking call per transaction; the target adds a delay; initiators may run ahead of the clock | millions of transactions/s | software bring-up, firmware, functional checks |
 | Approximately-timed (AT) | each transaction passes through timed phases; requests queue in the interconnect and target; contention is visible | hundreds of thousands/s | performance architecture: bandwidth, latency, utilization |
 | Cycle-accurate (CA) | every cycle modelled, every signal; usually the RTL itself or a hand-written cycle model | thousands/s | validating the AT model, late-stage tuning |
+The three styles as a spectrum:
+
+```mermaid
+flowchart LR
+    LT["<b>Loosely-timed</b><br/>b_transport plus a delay<br/>millions of txn/s<br/><i>software bring-up</i>"] -- "add phases<br/>and queues" --> AT["<b>Approximately-timed</b><br/>nb_transport, four phases<br/>hundreds of thousands/s<br/><i>bandwidth, latency, utilization</i>"]
+    AT -- "add every cycle<br/>and every signal" --> CA["<b>Cycle-accurate</b><br/>RTL or a cycle model<br/>thousands/s<br/><i>validate the AT model</i>"]
+    style LT fill:#d9f2d9
+    style AT fill:#dbe9ff
+    style CA fill:#fff3cd
+```
+
+Each step to the right costs roughly a thousandfold in speed and makes one more mechanism visible: AT adds contention between requesters, CA adds every signal.
 
 Your exercise 1 in Python is cycle-approximate for the DRAM (it counts cycles) but LT for everything in front of it. A production performance model is AT end to end, calibrated against CA results on a few workloads.
 
@@ -23,6 +35,21 @@ qk.set_global_quantum(sc_time(1, SC_US));
 socket->b_transport(trans, delay);
 qk.set_and_sync(delay);   // adds delay; waits only if over the quantum
 ```
+What `set_and_sync` does, as a loop:
+
+```mermaid
+flowchart TD
+    S["initiator calls<br/>b_transport"] --> D["target returns<br/>with a delay"]
+    D --> ADD["local offset += delay<br/><i>no wait, no context switch</i>"]
+    ADD --> Q{"local offset<br/>over the quantum?"}
+    Q -- "no" --> S
+    Q -- "yes" --> SYNC["wait for the local offset<br/>global clock catches up<br/>offset back to zero"]
+    SYNC --> S
+    style ADD fill:#d9f2d9
+    style SYNC fill:#fff3cd
+```
+
+While the loop stays on the "no" branch no other process runs, so from this initiator's point of view the target's queue is always empty. That is the mechanism by which contention disappears at LT.
 
 ## Lecture 8.3 — Approximately-timed in detail: phases
 
@@ -32,6 +59,24 @@ AT uses the non-blocking interface. Each transaction goes through four **phases*
 2. **END_REQ** — target → initiator: I have accepted it; you may send the next one (the request channel is free).
 3. **BEGIN_RESP** — target → initiator: here is the response (occupies the response channel).
 4. **END_RESP** — initiator → target: I have taken it; the response channel is free.
+One read, all four phases, with the return value of each call:
+
+```mermaid
+sequenceDiagram
+    participant I as Initiator
+    participant T as Target
+    I->>T: nb_transport_fw BEGIN_REQ
+    T-->>I: return TLM_ACCEPTED
+    Note over I,T: request channel busy, END_REQ waits while the queue is full
+    T->>I: nb_transport_bw END_REQ
+    I-->>T: return TLM_ACCEPTED
+    Note over I,T: target internal latency, your DRAM timing
+    T->>I: nb_transport_bw BEGIN_RESP
+    I-->>T: return TLM_ACCEPTED
+    Note over I,T: response channel busy until the initiator takes the data
+    I->>T: nb_transport_fw END_RESP
+    T-->>I: return TLM_COMPLETED
+```
 
 The time between END_REQ and BEGIN_RESP is the target's internal latency (your DRAM timing); the time a BEGIN_REQ waits before END_REQ is **request-channel back-pressure** (the queue is full); BEGIN_RESP waiting for END_RESP is **response-channel back-pressure** (the NoC is busy). Model each with a `sc_event`/queue and you have a faithful performance model. The **base protocol** rules: one request phase at a time per socket, one response phase at a time per socket, responses may be reordered only if IDs differ (the AXI rule again).
 
@@ -60,6 +105,24 @@ A performance model is only as good as its calibration. The process:
 2. Compare bandwidth, average latency, and the latency histogram. Target: within 5 % on bandwidth, within 10 % on average latency, same tail shape.
 3. Where they differ, find the missing mechanism (a turnaround you forgot, a refresh, a reorder-buffer limit) and add it; do not tune magic constants to fit.
 4. Record the calibration run and its numbers in the repo; re-run it whenever the model changes (a test).
+The loop, with the two outputs that must line up:
+
+```mermaid
+flowchart TD
+    TR["same short trace<br/><i>a few thousand requests, known pattern</i>"] --> M["AT model"]
+    TR --> R["RTL or cycle-accurate reference<br/><i>later, silicon</i>"]
+    M --> SM["bandwidth<br/>average latency<br/>latency histogram"]
+    R --> SR["bandwidth<br/>average latency<br/>latency histogram"]
+    SM --> C{"within 5 percent on bandwidth,<br/>10 percent on latency,<br/>same tail shape?"}
+    SR --> C
+    C -- "yes" --> REC["record the run and its numbers<br/>in the repo as a test"]
+    C -- "no" --> FIX["find the missing mechanism<br/>turnaround, refresh, reorder limit<br/><i>not a magic constant</i>"]
+    FIX --> M
+    style REC fill:#d9f2d9
+    style FIX fill:#f8d7d7
+```
+
+The arrow from the red box goes back to the model, never to the comparison: a constant tuned to close the gap on one trace reopens it on the next.
 
 When silicon exists, the final calibration is against measured numbers from the real chip, and that measurement is usually a memory-bandwidth microbenchmark (a STREAM-style copy loop) plus a pointer-chase latency test.
 
@@ -87,6 +150,23 @@ MemorySystem:
     plugins: []
   AddrMapper: {impl: RoBaRaCoCh}
 ```
+The same file as a tree:
+
+```mermaid
+flowchart TD
+    F["<b>Frontend</b><br/>SimpleO3, trace file, run length<br/><i>who issues the requests</i>"] --> MS["<b>MemorySystem</b><br/>GenericDRAM, clock_ratio"]
+    MS --> D["<b>DRAM</b><br/>impl DDR5<br/>org preset, timing preset<br/><i>Day 1 hierarchy, Day 2 table</i>"]
+    MS --> C["<b>Controller</b><br/>Generic"]
+    MS --> AM["<b>AddrMapper</b><br/>RoBaRaCoCh<br/><i>Day 1 bit order</i>"]
+    C --> SCH["Scheduler<br/>FRFCFS"]
+    C --> RP["RowPolicy<br/>OpenRowPolicy"]
+    C --> RM["RefreshManager<br/>AllBank"]
+    C --> PL["plugins<br/>counters, RowHammer defences"]
+    style D fill:#fff3cd
+    style C fill:#dbe9ff
+```
+
+Everything under DRAM is JEDEC data you look up; everything under Controller is a Day 3 design choice you make.
 
 Every line maps to something you built: `org` is Day 1's hierarchy, `timing` is Day 2's table, `Scheduler`/`RowPolicy`/`RefreshManager` are Day 3, `AddrMapper` is the address bit order from Day 1. Output statistics include bandwidth, average read latency, row-hit/miss/conflict counts and per-bank utilization — the same numbers your `run_stream()` returns. Reading someone else's config and knowing what every knob does is the skill; the tool itself is incidental.
 
@@ -102,6 +182,20 @@ The AT **base protocol** (TLM 2.0 LRM chapter 4) is what makes independently wri
 6. **Early completion**: a target may return TLM_COMPLETED from BEGIN_REQ for a trivially fast transaction; an initiator may return TLM_COMPLETED from BEGIN_RESP. Both compress the protocol legally.
 7. **Ordering across transactions**: the base protocol does not require responses in request order; the response exclusion rule only serializes the response channel. An AXI-faithful model adds the per-ID ordering itself.
 8. **Generic payload lifetime**: the transaction object must stay valid and unmodified by the initiator from BEGIN_REQ until END_RESP (or TLM_COMPLETED); hence reference counting.
+Rule 4 as the initiator sees it, right after calling `nb_transport_fw` with BEGIN_REQ:
+
+```mermaid
+flowchart TD
+    CALL["nb_transport_fw BEGIN_REQ<br/>returns"] --> RV{"which value?"}
+    RV -- "TLM_ACCEPTED" --> A["phase unchanged<br/>END_REQ arrives later on the backward path<br/><i>request channel still busy</i>"]
+    RV -- "TLM_UPDATED" --> U["phase is now END_REQ<br/>effective at now + delay<br/><i>request channel free</i>"]
+    RV -- "TLM_COMPLETED" --> CO["whole transaction done<br/>treat as END_RESP at now + delay<br/><i>no backward call will come</i>"]
+    style A fill:#fff3cd
+    style U fill:#d9f2d9
+    style CO fill:#dbe9ff
+```
+
+The three branches are exactly the three `if` arms in the initiator of Lecture 8.7.
 
 A **protocol checker** (`tlm_utils` ships none; Doulos and vendors provide one, and writing a 100-line one as a passthrough socket is a good exercise) asserts rules 1–3 and 8 at runtime and will catch most AT bugs within the first thousand transactions.
 
@@ -191,6 +285,15 @@ What a modeling project looks like from the first email to the last plot.
 **1. Frame the question.** Every model exists to answer one or two decisions: "how many channels", "which scheduler", "will the customer's trace meet 1 TB/s". Write the question and the acceptance criterion before writing code; it decides the required fidelity.
 
 **2. Choose fidelity per component.** Model the component under study at AT (or cycle-approximate); model everything around it at LT or as a statistical generator. A DRAM-controller study needs an AT controller, a cycle-counting DRAM, and a traffic generator that reproduces the right address and timing statistics; it does not need a cycle-accurate CPU.
+```mermaid
+flowchart LR
+    TG["traffic generator<br/><i>statistical, LT</i>"] --> NOC["NoC<br/><i>LT or a fixed delay</i>"]
+    NOC --> CTRL["<b>controller under study</b><br/><i>AT, queues and phases</i>"]
+    CTRL --> DRAM["DRAM<br/><i>cycle-counting</i>"]
+    style CTRL fill:#dbe9ff
+```
+
+Fidelity is spent where the question is; a cycle-accurate CPU in front would multiply the runtime without changing the controller's answer.
 
 **3. Define the workload.** Three options, from cheap to expensive: **synthetic** (random/sequential mixes, parameterized locality, burstiness, read:write ratio — your `mixed_stream`), **trace-driven** (replay an address trace with timestamps; must decide whether timing is **open-loop** — issue at recorded times regardless of response — or **closed-loop** — issue depends on completions, which needs a dependency model), and **execution-driven** (a real CPU model, gem5-style, running the real program — accurate and slow). Most IP-vendor work is synthetic plus trace-driven with a closed-loop MSHR model.
 
@@ -231,6 +334,29 @@ An IP company's modeling team typically maintains: SystemC/TLM AT models of each
 | `Controller.plugins` | counters, RowHammer defences, trace recorders | your `trace` list |
 | `AddrMapper.impl` | bit order, e.g. `RoBaRaCoCh`, `MOP4CLXOR` (XOR hashing) | `decode()` and its variants |
 | output stats | `total_num_read_requests`, `avg_read_latency_0`, `num_row_hits/misses/conflicts`, per-channel bandwidth | `stats` dict |
+The last row, side by side with what `run_stream()` returns:
+
+```mermaid
+flowchart LR
+    subgraph RAM["Ramulator 2 output"]
+        R1["total_num_read_requests"]
+        R2["avg_read_latency_0"]
+        R3["num_row_hits, misses, conflicts"]
+        R4["per-channel bandwidth"]
+    end
+    subgraph MINE["your stats dict"]
+        M1["requests served"]
+        M2["mean latency in ns"]
+        M3["hit, miss, conflict counts"]
+        M4["bandwidth in GB/s"]
+    end
+    R1 --- M1
+    R2 --- M2
+    R3 --- M3
+    R4 --- M4
+```
+
+Same trace in, same four numbers out. If the row-hit counts agree and the bandwidth does not, the gap is in timing parameters, not in the scheduler.
 
 When you can map every line to something you built and explain what changing it would do, you understand memory-controller modeling at the level a senior architect expects.
 
@@ -296,6 +422,22 @@ struct AtMemory : sc_module {
     }
 };
 ```
+How a transaction moves through `AtMemory`:
+
+```mermaid
+flowchart TD
+    BR["nb_fw with BEGIN_REQ"] --> FULL{"q.size at DEPTH?"}
+    FULL -- "yes" --> ACC["return TLM_ACCEPTED<br/><i>END_REQ owed later</i>"]
+    FULL -- "no" --> PUSH["push to q<br/>phase = END_REQ, delay + 2 ns<br/>return TLM_UPDATED"]
+    PUSH --> SCH["scheduler thread<br/>FR-FCFS pick over q<br/>wait 16 ns on a hit, 48 ns otherwise"]
+    SCH --> PEQ["peq.notify BEGIN_RESP"]
+    PEQ --> BW["peq_cb calls<br/>nb_transport_bw BEGIN_RESP"]
+    BW --> ER["nb_fw with END_RESP<br/>return TLM_COMPLETED"]
+    style ACC fill:#f8d7d7
+    style PUSH fill:#d9f2d9
+```
+
+The red branch is the unfinished part of the skeleton: nothing yet sends the owed END_REQ when a slot frees. That is the `pending_req` fix from Lecture 8.7, and counting how often this branch is taken is the second checkbox below.
 
 The initiator side for `nb_transport` needs a backward-path callback that records completion and an `sc_event` the run loop waits on; keep up to N transactions in flight (start with N = 4) and record latency per transaction. Add a second initiator and bind both through a `tlm_utils::multi_passthrough_target_socket` or simply instantiate two targets to start.
 

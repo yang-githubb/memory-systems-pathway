@@ -23,6 +23,18 @@ Each node is a router with its own attached block (a core, an accelerator, a mem
 
 Two sizes to keep in mind: a 64-byte read response on a 128-bit link is 4 data flits plus a head, 5 flits; a read request is a single flit. That asymmetry (requests are small, responses are big) matters for sizing links in each direction.
 
+The same 64-byte response, chopped for a 128-bit link:
+
+```mermaid
+flowchart LR
+    PKT["<b>Packet</b><br/>header: src, dst, type<br/>payload: address + 64 B data"] -- "NI chops into<br/>link-width flits" --> H["<b>head</b><br/>src, dst, type<br/><i>carries the route</i>"]
+    H --> B1["body<br/>16 B"] --> B2["body<br/>16 B"] --> B3["body<br/>16 B"] --> T["<b>tail</b><br/>16 B<br/><i>last flit, frees the path</i>"]
+    style H fill:#dbe9ff
+    style T fill:#fff3cd
+```
+
+Only the head is routed; body and tail follow it in order on the same path, which is why a blocked head stalls the whole packet behind it.
+
 ## Lecture 5.2 — Topology
 
 The **topology** is the wiring pattern. The common ones:
@@ -37,11 +49,60 @@ The **topology** is the wiring pattern. The common ones:
 
 **Bisection bandwidth** = total bandwidth across a cut that halves the network. It bounds all-to-all traffic such as memory accesses spread over many controllers. A 4×4 mesh with 128-bit links at 2 GHz has 4 links × 32 GB/s = 128 GB/s across its middle; if 16 cores each want 10 GB/s from controllers on the far side, the mesh, not the DRAM, is the bottleneck. That calculation is one of the first a NoC architect does.
 
+```mermaid
+flowchart LR
+    subgraph WH["West half: 8 nodes"]
+        W0["row 0"]
+        W1["row 1"]
+        W2["row 2"]
+        W3["row 3"]
+    end
+    subgraph EH["East half: 8 nodes, memory controllers"]
+        E0["row 0"]
+        E1["row 1"]
+        E2["row 2"]
+        E3["row 3"]
+    end
+    W0 -- "32 GB/s" --- E0
+    W1 -- "32 GB/s" --- E1
+    W2 -- "32 GB/s" --- E2
+    W3 -- "32 GB/s" --- E3
+```
+
+The cut crosses exactly four links, so everything the west half wants from the east half funnels through 4 × 32 = 128 GB/s, however fast the DRAM behind it is.
+
 ## Lecture 5.3 — Routing
 
 **Routing** decides the path. On a mesh the simplest is **dimension-order (XY) routing**: travel in X until the column matches, then in Y. It is **deterministic** (same source and destination always take the same path), easy to build, and **deadlock-free**: because every packet turns only from X to Y and never Y to X, no cycle of waiting packets can form. **Adaptive** routing picks among several minimal paths based on congestion; it spreads load but needs extra machinery (escape channels or turn restrictions) to stay deadlock-free.
 
+XY as the decision every router makes for a head flit:
+
+```mermaid
+flowchart TD
+    Q1{"destination x ≠ my x?"} -- "yes" --> X["go <b>E</b> or <b>W</b><br/><i>finish X first</i>"]
+    Q1 -- "no" --> Q2{"destination y ≠ my y?"}
+    Q2 -- "yes" --> Y["go <b>N</b> or <b>S</b><br/><i>Y only once X is done</i>"]
+    Q2 -- "no" --> L["<b>local</b> port<br/>deliver to the attached block"]
+    style L fill:#d9f2d9
+```
+
+Because the questions are always asked in this order, a packet that is moving in Y has finished with X and will never ask for an X link again; 5.7 turns that fact into the deadlock-freedom proof.
+
 **Deadlock**: packet A holds buffer 1 and waits for buffer 2; packet B holds buffer 2 and waits for buffer 1. Nothing ever moves. On a ring, a full circle of packets each waiting on the next is exactly this. Routing restrictions and virtual channels (next section) are the two tools against it.
+
+```mermaid
+flowchart LR
+    A["packet A<br/>holds a buffer in R1<br/>waits for a slot in R2"] -- "waits for" --> B["packet B<br/>holds a buffer in R2<br/>waits for a slot in R3"]
+    B -- "waits for" --> C["packet C<br/>holds a buffer in R3<br/>waits for a slot in R4"]
+    C -- "waits for" --> D["packet D<br/>holds a buffer in R4<br/>waits for a slot in R1"]
+    D -- "waits for" --> A
+    style A fill:#f8d7d7
+    style B fill:#f8d7d7
+    style C fill:#f8d7d7
+    style D fill:#f8d7d7
+```
+
+The arrows close a cycle, so no buffer is ever freed. A turn restriction removes one kind of arrow so the cycle cannot close; a virtual channel gives a waiting packet a second buffer, so the holder of R1 is no longer the only thing D can wait on.
 
 ## Lecture 5.4 — Inside a router: buffers, virtual channels, credits
 
@@ -53,15 +114,66 @@ A router has an input buffer per port, a crossbar, and an arbiter. A flit passes
 4. **Switch traversal (ST)** — it crosses the crossbar.
 5. **Link traversal (LT)** — it crosses the wire to the next router.
 
+```mermaid
+flowchart LR
+    IN["flit arrives<br/>written into input buffer"] --> RC["<b>RC</b><br/>route computation<br/><i>pick the output port</i>"] --> VA["<b>VA</b><br/>VC allocation<br/><i>claim a downstream buffer</i>"] --> SA["<b>SA</b><br/>switch allocation<br/><i>win the crossbar for a cycle</i>"] --> ST["<b>ST</b><br/>switch traversal"] --> LT["<b>LT</b><br/>link traversal<br/><i>to the next router</i>"]
+    IN -. "body and tail flits<br/>inherit route and VC" .-> SA
+    style RC fill:#dbe9ff
+    style VA fill:#dbe9ff
+```
+
+Only the head flit pays RC and VA; body and tail skip to SA, which is why a hop costs 3–5 cycles for the head and then one cycle per following flit.
+
 So each hop costs about 3–5 cycles plus link delay; a 4×4 mesh has at most 6 hops, so unloaded latency is about 20–30 cycles end to end. Under load, flits also wait in buffers, and that wait is what your simulator measures.
 
 **Virtual channels (VCs)** split one physical input buffer into several logical queues. Without them, a blocked packet at the head of a queue blocks everything behind it even if those packets want a free output — **head-of-line (HoL) blocking**. With two VCs, the second packet can use the other queue and proceed. VCs also separate traffic classes (requests vs responses) so one class cannot deadlock the other. More VCs = more throughput and more area; 2–4 per port is typical.
 
+```mermaid
+flowchart LR
+    subgraph ONE["One queue per input port"]
+        B1["pkt B wants north<br/><i>north is free, still stuck</i>"] -- "queued behind" --> A1["pkt A wants east<br/><i>east is busy</i>"]
+    end
+    subgraph TWO["Two VCs per input port"]
+        A2["VC0: pkt A wants east<br/><i>waits</i>"]
+        B2["VC1: pkt B wants north<br/><i>proceeds</i>"]
+    end
+    style A1 fill:#f8d7d7
+    style B1 fill:#f8d7d7
+    style A2 fill:#f8d7d7
+    style B2 fill:#d9f2d9
+```
+
 **Credit-based flow control**: a router may send a flit downstream only if it holds a **credit**, meaning the downstream buffer has a free slot for that VC. Each flit sent spends a credit; each flit the downstream router forwards returns one. Credits never let a buffer overflow, and the round-trip time of a credit (send flit → downstream frees slot → credit returns) sets the minimum buffer depth for full-speed streaming: depth ≥ credit round-trip in cycles. With 2-cycle links and a 3-cycle router, that is 5–8 flits per VC.
+
+```mermaid
+sequenceDiagram
+    participant U as Upstream router
+    participant D as Downstream router
+    Note over U,D: credits = free slots in D's input buffer for this VC, here 3
+    U->>D: flit 1 (credits 3 to 2)
+    U->>D: flit 2 (credits 2 to 1)
+    U->>D: flit 3 (credits 1 to 0)
+    Note over U: credits = 0, the link idles
+    Note over D: flit 1 wins the switch and leaves, one slot frees
+    D-->>U: credit (credits 0 to 1)
+    U->>D: flit 4 (credits 1 to 0)
+    Note over U,D: flit out, slot freed, credit back = the round trip the buffer depth must cover
+```
 
 ## Lecture 5.5 — Latency, throughput and saturation
 
 Plot average packet latency against **injection rate** (packets per node per cycle, the same for every node). At low rates latency is flat at the zero-load value (hops × pipeline + serialization). As rate climbs, buffers fill and latency rises gently, then explodes: that is the **saturation point**, typically 30–60 % of the theoretical link capacity for a mesh under uniform random traffic. Beyond it, the network accepts fewer packets than are offered and queues at the NIs grow without bound — the same hockey-stick as a memory queue at 95 % utilization.
+
+```mermaid
+flowchart LR
+    LOW["<b>low load</b><br/>latency flat at zero-load<br/>hops × pipeline + serialization"] -- "rate climbs" --> MID["<b>rising</b><br/>buffers fill, flits wait<br/>latency grows gently"]
+    MID -- "30–60 % of link capacity" --> SAT["<b>saturation</b><br/>accepted rate stops following offered<br/>NI queues grow without bound"]
+    style LOW fill:#d9f2d9
+    style MID fill:#fff3cd
+    style SAT fill:#f8d7d7
+```
+
+Read the curve by regime rather than by point: the knee between rising and saturation is the number you report for a design.
 
 The standard traffic patterns to test: **uniform random** (every destination equally likely; the baseline), **hotspot** (a fraction of packets to one node, such as a single memory controller), **transpose** and **bit-complement** (stress particular links), and **traces** from a real workload. A NoC that saturates at 45 % under uniform random may saturate at 15 % under hotspot — which is why memory controllers are placed carefully on the mesh edge and interleaved.
 
@@ -92,6 +204,16 @@ For a network of N nodes, four numbers characterize a topology before any simula
 **Turn model (Glass and Ni).** XY forbids four of the eight turns; that is more than necessary. Forbidding just two carefully chosen turns (e.g. west-first: forbid north→west and south→west) still breaks every cycle and leaves many paths, giving **partially adaptive** routing with no extra VCs. The **odd-even** turn model forbids different turns in odd and even columns and spreads load better.
 
 **Escape channels (Duato).** Fully adaptive routing on any topology: give every packet a choice of VCs, let it use most VCs adaptively, but reserve one VC per link as an **escape** channel on which routing is restricted (e.g. XY). A packet that cannot progress adaptively can always fall back to the escape VC, which is deadlock-free, so the whole thing is. Cost: one VC. This is how most adaptive NoCs and all large-scale interconnects (InfiniBand, Cray) avoid deadlock.
+
+```mermaid
+flowchart LR
+    P["packet at a router<br/>chooses a VC on the output link"] --> AD["<b>adaptive VCs</b><br/>any minimal direction, by congestion<br/><i>may form a waiting cycle</i>"]
+    P --> ESC["<b>escape VC</b><br/>XY only<br/><i>cycle-free, as in 5.3</i>"]
+    AD -- "blocked? fall back" --> ESC
+    ESC --> OUT["always drains,<br/>so the adaptive VCs drain too"]
+    style AD fill:#fff3cd
+    style ESC fill:#d9f2d9
+```
 
 **Protocol deadlock.** Separate from routing deadlock: a request packet waits for a buffer held by a response packet that cannot leave until the request completes. Fixed by giving requests and responses separate **virtual networks** (disjoint VC sets) so one class never waits on the other. A coherence protocol with three classes (request, snoop, response) needs three virtual networks. When sizing a NoC for CHI, count VCs per class.
 
@@ -275,6 +397,24 @@ if __name__ == "__main__":
     for r in (0.02, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4):
         print(run(r))
 ```
+
+What one call to `step()` does, in order:
+
+```mermaid
+flowchart TD
+    INJ["<b>inject</b><br/>each router, with probability inj_rate,<br/>puts 5 flits into its L buffer if they fit"] --> HEAD["for the head flit of every input buffer<br/>out = route(dst)"]
+    HEAD -- "out is L" --> EJ["<b>eject</b><br/>tail flit records latency<br/>credit returned upstream"]
+    HEAD -- "credit for out available" --> MV["propose the move"]
+    HEAD -- "no credit" --> WAIT["stay in the buffer<br/><i>this wait is the latency you measure</i>"]
+    MV --> SA["<b>switch allocation</b><br/>one flit per output port per cycle"]
+    SA --> SEND["pop the flit, spend one credit,<br/>return one credit upstream,<br/>push to neighbour.pending at t + ROUTER_DELAY"]
+    SEND --> ARR["<b>pending to inbuf</b><br/>flits whose ready cycle has come<br/>land in the neighbour's input buffer"]
+    ARR --> T["t += 1"]
+    style WAIT fill:#fff3cd
+    style EJ fill:#d9f2d9
+```
+
+The `pending` list with ROUTER_DELAY is the whole 5.4 pipeline collapsed into one number, and the credit counter is the only thing keeping a buffer from overflowing, which is what the assert in the checklist guards.
 
 **Then make `ex3_noc/sweep.py`** that plots average latency vs injection rate and *accepted* rate vs injection rate on two panels, saved as `ex3_latency.png`. Mark the saturation point: the first rate where accepted rate stops following the injected rate.
 

@@ -8,6 +8,16 @@ RTL simulation (SystemVerilog) models every wire every clock cycle. It is exact 
 
 On top of SystemC sits **TLM 2.0** (transaction-level modeling), which replaces wire-level signalling between modules with function calls carrying a whole **transaction** ("read 64 bytes at address X"). That is the layer performance models live on. Vendors (Synopsys Platform Architect, Cadence, Arm Fast Models) and open-source tools (gem5's SystemC bridge) all speak TLM 2.0, which is why it is the one framework worth learning first.
 
+The three layers, and what each one gives up to go faster:
+
+```mermaid
+flowchart LR
+    RTL["<b>RTL</b><br/>every wire, every clock cycle<br/><i>exact, a few thousand cycles per second</i>"] -- "abstract away wires and cycles" --> SC["<b>SystemC</b><br/>modules, processes, events, sc_time<br/><i>a C++ program you compile and run</i>"]
+    SC -- "replace signals with function calls" --> TLM["<b>TLM 2.0</b><br/>sockets carrying whole transactions<br/><i>where performance models live</i>"]
+    style RTL fill:#f8d7d7
+    style TLM fill:#d9f2d9
+```
+
 ## Lecture 7.2 — SystemC in one page
 
 | Concept | What it is | In code |
@@ -22,6 +32,21 @@ On top of SystemC sits **TLM 2.0** (transaction-level modeling), which replaces 
 
 The kernel runs a **delta cycle** loop: run every process that is ready, let signals update, repeat until nothing is ready, then advance time to the next scheduled event. For a TLM model you rarely think about delta cycles; you think in transactions and `wait()`.
 
+```mermaid
+flowchart TD
+    EV["<b>Evaluate</b><br/>run every runnable process<br/><i>methods to completion, threads to their next wait</i>"] --> UP["<b>Update</b><br/>apply pending signal writes"]
+    UP --> Q{"Did the updates make<br/>any process runnable?"}
+    Q -- "yes, a delta cycle<br/>time unchanged" --> EV
+    Q -- "no" --> Q2{"Any timed<br/>event pending?"}
+    Q2 -- "yes" --> ADV["<b>Advance time</b><br/>to the earliest pending event"]
+    ADV --> EV
+    Q2 -- "no" --> DONE["Simulation ends<br/><i>or earlier, when sc_stop is called</i>"]
+    style ADV fill:#dbe9ff
+    style DONE fill:#d9f2d9
+```
+
+Simulated time only moves in the blue box; everything else in the loop happens "at the same instant", which is why a thousand `b_transport` calls can complete without the clock advancing at all.
+
 ## Lecture 7.3 — TLM 2.0: initiators, targets, sockets, payload
 
 - An **initiator** starts transactions (a core model, a traffic generator). A **target** answers them (a memory model). An **interconnect** is both (target on one side, initiator on the other) and routes by address.
@@ -31,6 +56,46 @@ The kernel runs a **delta cycle** loop: run every process that is ready, let sig
 - **Non-blocking transport**: `nb_transport_fw` / `nb_transport_bw` pass the transaction through **phases** (BEGIN_REQ, END_REQ, BEGIN_RESP, END_RESP) with callbacks, so several transactions can be in flight and contention shows up. This is what approximately-timed performance models use (Day 8).
 - **DMI** (direct memory interface) lets an initiator get a raw pointer to a target's memory and skip the socket entirely; used to make software run fast, not for performance measurement.
 
+The pieces, and how the payload travels between them:
+
+```mermaid
+flowchart LR
+    I["<b>Initiator</b><br/>core model, traffic generator<br/><i>creates and owns the payload</i>"] -- "initiator socket<br/>bound to target socket" --> X["<b>Interconnect</b><br/>target socket on one side,<br/>initiator socket on the other<br/><i>routes by address</i>"]
+    X -- "initiator socket<br/>bound to target socket" --> T["<b>Target</b><br/>memory model<br/><i>fills the payload, adds delay</i>"]
+    P["<b>Generic payload</b><br/>command, address, data pointer,<br/>length, response status"] -. "passed by reference<br/>along every call" .-> X
+    style P fill:#fff3cd
+```
+
+One blocking transaction, step by step. Note where simulated time stands at each point:
+
+```mermaid
+sequenceDiagram
+    participant I as Initiator thread
+    participant T as Target
+    Note over I: sim time 1000 ns, delay = 0
+    I->>T: b_transport payload, delay
+    Note over T: copy bytes through the data pointer
+    Note over T: delay += 50 ns, status = OK
+    T-->>I: return, delay = 50 ns
+    Note over I: sim time still 1000 ns
+    Note over I: wait(delay)
+    Note over I: sim time 1050 ns, measured latency 50 ns
+```
+
+The target never touches the clock; it only writes a number into `delay`. The initiator thread is blocked inside the call, so it cannot have a second transaction in flight. Non-blocking transport splits the same transaction into four phase messages so that it can:
+
+```mermaid
+sequenceDiagram
+    participant I as Initiator
+    participant T as Target
+    I->>T: nb_transport_fw BEGIN_REQ
+    T-->>I: nb_transport_bw END_REQ
+    Note over I,T: request accepted, the initiator is free to issue the next one
+    T-->>I: nb_transport_bw BEGIN_RESP
+    I->>T: nb_transport_fw END_RESP
+    Note over I,T: between END_REQ and BEGIN_RESP several transactions can be queued in the target
+```
+
 ## Lecture 7.4 — Reading a TLM model
 
 When you open a colleague's SystemC performance model, look for these in order: (1) `sc_main` or the top module: it tells you which blocks exist and how sockets bind; (2) the initiator's thread: how it generates traffic and whether it uses `b_transport` or `nb_transport`; (3) the target's transport function: that is where timing is modelled; (4) any `sc_time` constants and config files: those are the knobs; (5) the statistics collection and what `sc_stop()` triggers. Everything else is plumbing.
@@ -38,6 +103,19 @@ When you open a colleague's SystemC performance model, look for these in order: 
 ## Lecture 7.5 — SystemC semantics in detail
 
 **Elaboration then simulation.** A SystemC program has two phases. In **elaboration** (`sc_main` before `sc_start()`) modules are constructed, ports bound and processes registered; the structure is frozen. In **simulation** (`sc_start()`) the kernel runs the scheduler until no events remain, `sc_stop()` is called, or the requested time elapses. Creating a module after `sc_start()` is an error — all structure must exist up front, which is why models read their configuration at construction.
+
+```mermaid
+flowchart LR
+    subgraph EL["Elaboration, inside sc_main before sc_start"]
+        C1["construct modules<br/><i>read config here</i>"] --> C2["bind ports and sockets"] --> C3["register processes"]
+    end
+    subgraph SIM["Simulation, inside sc_start"]
+        S1["scheduler loop<br/><i>evaluate, update, advance</i>"] --> S2["stops when no events remain,<br/>sc_stop is called,<br/>or the time limit elapses"]
+    end
+    C3 -- "structure frozen" --> S1
+    style C1 fill:#dbe9ff
+    style S2 fill:#d9f2d9
+```
 
 **The scheduler loop, precisely.**
 
@@ -51,6 +129,22 @@ When you open a colleague's SystemC performance model, look for these in order: 
 **Time resolution.** `sc_set_time_resolution(1, SC_PS)` before any `sc_time` is created; defaults to 1 ps. All times are integers in this unit, so 0.3 ns becomes 300 ps exactly and 1/3 ns is rounded. Pick the resolution to match your clock and never compare `sc_time` with doubles.
 
 **Processes.** `SC_THREAD` has its own stack (expensive: thousands of threads cost memory and context switches), can `wait()`, runs once from the start. `SC_METHOD` has no stack, runs to completion each trigger, cheaper; use `next_trigger()` to change sensitivity dynamically. `SC_CTHREAD` is a clocked thread for RTL-style models. Performance models are mostly `SC_THREAD` for sequencing and `SC_METHOD` for reactive bookkeeping.
+
+```mermaid
+flowchart TD
+    TRG["trigger arrives<br/><i>event, signal change, timeout</i>"] --> MB
+    TRG --> TB
+    subgraph MB["SC_METHOD"]
+        M1["run the function from the top"] --> M2["return, no wait allowed"]
+        M2 --> M3["<i>no stack, cheap</i><br/>reactive bookkeeping, counters"]
+    end
+    subgraph TB["SC_THREAD"]
+        T1["resume where it last stopped"] --> T2["run until the next wait"]
+        T2 --> T3["<i>own stack, costs memory</i><br/>sequencing, traffic generators"]
+    end
+    style MB fill:#dbe9ff
+    style TB fill:#fff3cd
+```
 
 **Ports, exports and interfaces.** `sc_port<IF>` is a pointer-like handle an initiator calls through; `sc_export<IF>` lets a module expose an implementation; a channel (`sc_signal`, `sc_fifo`, `tlm_fifo`) implements interfaces. TLM sockets are just ports and exports bundled with the transport interfaces.
 
@@ -78,6 +172,23 @@ When you open a colleague's SystemC performance model, look for these in order: 
 | `set/get_response_status` | `tlm_response_status` | OK, INCOMPLETE (initial), GENERIC_ERROR, ADDRESS_ERROR, COMMAND_ERROR, BURST_ERROR, BYTE_ENABLE_ERROR |
 | `set/get_gp_option` |  | minimal vs full-payload semantics, for DMI/debug |
 | `set_extension<T>` / `get_extension<T>` |  | attach arbitrary data (an ID, a QoS class, a timestamp) — the escape hatch for protocol-specific fields |
+
+The same fields grouped by who writes them:
+
+```mermaid
+flowchart LR
+    I["<b>Initiator</b><br/>fills What and Where,<br/>sets status INCOMPLETE"] --> GP
+    subgraph GP["tlm_generic_payload, owned by the initiator"]
+        direction TB
+        W["<b>What</b><br/>command READ, WRITE or IGNORE<br/>address, data length,<br/>streaming width"]
+        D["<b>Where the bytes live</b><br/>data pointer, byte enable pointer<br/><i>initiator storage, the target copies through it</i>"]
+        R["<b>Result</b><br/>response status OK or an error<br/>dmi allowed flag"]
+        E["<b>Extensions</b><br/>AXI ID, QoS, source, issue timestamp<br/><i>the escape hatch</i>"]
+    end
+    GP --> T["<b>Target</b><br/>reads or writes the bytes,<br/>sets Result"]
+    style R fill:#d9f2d9
+    style E fill:#fff3cd
+```
 
 **Extensions are how real models carry AXI ID, QoS, source tile, and the injection timestamp** used for latency statistics. Define a struct deriving from `tlm::tlm_extension<MyExt>`, implement `clone()` and `copy_from()`, attach with `trans.set_extension(new MyExt{...})`. **Ignorable** extensions may be dropped by components that do not understand them; **mandatory** ones must be understood (use `set_auto_extension` for the former).
 
@@ -184,6 +295,20 @@ int sc_main(int, char**) {
     std::cout << "bus transactions: " << bus.count << std::endl;
     return 0;
 }
+```
+
+The platform that `sc_main` builds:
+
+```mermaid
+flowchart LR
+    CPU["<b>cpu</b> Initiator<br/>500 reads from 0x0000<br/>think 20 ns"] -- "simple initiator socket" --> IN["in<br/>multi passthrough<br/>target socket"]
+    DMA["<b>dma</b> Initiator<br/>500 reads from 0x10000<br/>think 5 ns"] -- "simple initiator socket" --> IN
+    subgraph BUS["bus, hop 4 ns each way"]
+        IN --> DEC["address decode<br/>0x00000 to 0x0FFFF is port 0<br/>0x10000 to 0x1FFFF is port 1"] --> OUT["out<br/>multi passthrough<br/>initiator socket"]
+    end
+    OUT -- "port 0" --> M0["<b>m0</b> Memory<br/>64 KB, 40 ns"]
+    OUT -- "port 1" --> M1["<b>m1</b> Memory<br/>64 KB, 60 ns"]
+    style BUS fill:#dbe9ff
 ```
 
 Read it top-down once, then note: the **extension** carries the issue time and the source; the **bus** rewrites and restores the address (the TLM rule for interconnects); **multi-passthrough sockets** let one socket bind many; `sc_time_stamp()` differences give latency without any global clock. In LT mode the two initiators never contend; converting the bus to AT (Day 8) makes `hop` a queue instead of a constant, and contention appears.
@@ -339,6 +464,17 @@ int sc_main(int, char**) {
     sc_start();
     return 0;
 }
+```
+
+The two modules, the one binding, and where the 60 ns per request comes from:
+
+```mermaid
+flowchart LR
+    subgraph TOP["sc_main, elaboration"]
+        I["<b>init</b> Initiator<br/>SC_THREAD run<br/>1000 requests, every 4th a write<br/>think 10 ns"] -- "init.socket.bind mem.socket" --> M["<b>mem</b> Memory<br/>1 MB, b_transport<br/>delay += 50 ns"]
+    end
+    I --- N["one loop iteration<br/>b_transport returns with delay = 50 ns, sim time unchanged<br/>wait delay adds 50 ns<br/>wait 10 ns think adds 10 ns<br/><b>60 ns per request, 60 µs for 1000</b>"]
+    style N fill:#fff3cd
 ```
 
 **Build and run**

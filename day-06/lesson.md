@@ -14,9 +14,57 @@ Inside an SoC, blocks connect through a standard interface so that an IP block f
 | AR — read address | manager → subordinate | address, burst length, ID for a read |
 | R — read data | subordinate → manager | the data beats plus response, with the ID |
 
+The five channels as wires. Three run toward the subordinate, two come back; none of them waits for another:
+
+```mermaid
+flowchart LR
+    M["<b>Manager</b><br/>core, DMA engine<br/>or NoC bridge"]
+    S["<b>Subordinate</b><br/>memory controller<br/>or peripheral"]
+    M -- "AW — write address, len, ID" --> S
+    M -- "W — write data beats, WLAST" --> S
+    S -- "B — write response, ID" --> M
+    M -- "AR — read address, len, ID" --> S
+    S -- "R — read data beats, ID, RLAST" --> M
+    style M fill:#dbe9ff
+    style S fill:#d9f2d9
+```
+
+Because AW and W are separate, a write's data may arrive before its address; because AR and R are separate, many reads can be in flight before the first R beat returns.
+
 Each channel uses the same two-wire **handshake**: the sender raises VALID when it has something; the receiver raises READY when it can take it; the transfer happens on the clock edge where both are high. Because the channels are independent, a manager can have many reads and writes **outstanding** (issued, not yet answered) at once — that is where the parallelism you studied in Day 4 (Little's law) comes from.
 
+Two transfers on one channel, the second with a slow receiver:
+
+```mermaid
+sequenceDiagram
+    participant M as Manager
+    participant S as Subordinate
+    Note over M,S: cycle 1 — receiver already has room
+    M->>S: VALID=1, payload A
+    S-->>M: READY=1 → A transfers on this edge
+    Note over M,S: cycle 2 — receiver busy, READY comes late
+    M->>S: VALID=1, payload B
+    S-->>M: READY=0 → B waits, VALID must stay high
+    Note over M,S: cycle 3
+    S-->>M: READY=1 → B transfers on this edge
+    Note over M,S: VALID never waits for READY, READY may wait for VALID
+```
+
+A transfer is the clock edge where both are 1; the payload is frozen from the moment VALID rises until that edge.
+
 **IDs and ordering.** Every transaction carries an ID. Responses with the *same* ID must return in order; responses with *different* IDs may return in any order. So a memory controller that reorders requests (FR-FCFS!) must either give each request a distinct ID or keep a reorder buffer per ID. This is why controllers have a **reorder buffer** and why its depth is a parameter in your models.
+
+```mermaid
+sequenceDiagram
+    participant M as Manager
+    participant S as Subordinate (controller)
+    M->>S: AR  ID=3  addr 0x1000 — row conflict
+    M->>S: AR  ID=7  addr 0x2040 — row hit
+    Note over S: FR-FCFS serves the hit first
+    S-->>M: R  ID=7  data, RLAST
+    S-->>M: R  ID=3  data, RLAST
+    Note over M,S: different IDs — any order is legal<br/>same ID — issue order, so the controller<br/>would hold the hit's data in a reorder buffer until the conflict returns
+```
 
 **Bursts.** One address can request up to 256 beats (AXI4) of data; a 64-byte line on a 128-bit bus is a 4-beat burst (INCR type). Bursts let the bus carry a cache line with one address handshake.
 
@@ -30,6 +78,29 @@ When several cores each cache the same data, their copies must stay consistent: 
 - A read becomes: RN sends a request to the HN → HN checks its directory → if another RN holds a dirty copy, HN sends it a **snoop** and the data is forwarded; otherwise HN reads from the SN (your memory controller) → data returns to the RN → RN sends a completion acknowledgement.
 - States: each cache line is **Invalid, Shared Clean, Unique Clean, Shared Dirty or Unique Dirty** (the MESI idea with CHI names).
 
+The read flow drawn out, both branches of the home node's directory lookup:
+
+```mermaid
+sequenceDiagram
+    participant R as RN-F requester
+    participant H as HN-F home node
+    participant O as RN-F holding X dirty
+    participant S as SN-F memory controller
+    R->>H: REQ ReadShared X
+    Note over H: directory / snoop filter lookup for X
+    alt another cache holds X dirty
+        H->>O: SNP SnpShared X
+        O-->>R: DAT data, cache to cache
+        O-->>H: RSP snoop response, optional write-back data
+    else no cached copy
+        H->>S: REQ ReadNoSnp X
+        S-->>R: DAT data from DRAM
+    end
+    R->>H: RSP CompAck — home frees its tracker entry
+```
+
+In the snoop branch your memory controller never sees the read; in the other branch it sees it only after the home node's lookup latency.
+
 For a memory performance model, CHI matters because the home node adds latency and because snoop traffic competes with memory traffic on the NoC. A customer running CHI will quote "loaded latency from RN to DRAM and back", which includes your controller but also the interconnect in front of it; knowing where each nanosecond goes is the job.
 
 ## Lecture 6.3 — Chiplets and UCIe
@@ -42,13 +113,58 @@ Three layers:
 2. **Die-to-die adapter**: link training, CRC and retry for reliability, arbitration between protocols.
 3. **Protocol layer**: carries PCIe, CXL, or a **streaming** (raw) protocol — the raw mode is what you use to extend an on-chip NoC or AXI across dies.
 
+```mermaid
+flowchart TD
+    P["<b>Protocol layer</b><br/>PCIe, CXL, or streaming raw flits<br/><i>streaming is how NoC / AXI / CHI cross dies</i>"]
+    A["<b>Die-to-die adapter</b><br/>link training, CRC and retry, arbitration<br/><i>the latency you budget lives here</i>"]
+    Y["<b>Physical layer</b><br/>lanes, forwarded clock, sideband<br/>4–32 GT/s per lane"]
+    W["Package wires<br/>to the other die's PHY<br/><i>same three layers mirrored there</i>"]
+    P --> A --> Y --> W
+    style P fill:#dbe9ff
+    style A fill:#fff3cd
+    style Y fill:#d9f2d9
+```
+
 Two packaging classes change the numbers: **standard package** (dies on an organic substrate, bumps 100–130 µm apart, reach 10–25 mm, lower bandwidth per mm of die edge) and **advanced package** (silicon interposer or bridge, bumps 25–55 µm apart, reach about 2 mm, several times the bandwidth per mm). An HBM stack next to a compute die is the advanced-package case.
+
+```mermaid
+flowchart LR
+    subgraph SP["Standard package"]
+        S1["dies on an <b>organic substrate</b><br/>bump pitch 100–130 µm<br/>reach 10–25 mm<br/>~0.2 TB/s per mm of die edge"]
+        S2["most SoCs<br/>UCIe x16 modules"]
+        S1 --> S2
+    end
+    subgraph AP["Advanced package"]
+        A1["<b>silicon interposer or bridge</b><br/>bump pitch 25–55 µm<br/>reach about 2 mm<br/>~1.3 TB/s per mm of die edge"]
+        A2["HBM next to compute<br/>UCIe x64 modules"]
+        A1 --> A2
+    end
+    style S1 fill:#dbe9ff
+    style A1 fill:#d9f2d9
+```
+
+Finer bumps mean more wires per millimetre of edge, which is the bandwidth; shorter reach is the price.
 
 For a modeler, a UCIe link is: fixed latency (tens of ns including adapter and retry logic), a bandwidth cap per lane group, and a **flit** format (64 B or 256 B) with overhead. Any memory request that crosses a die boundary pays that latency twice (request and response), which is why chiplet designs try to keep each die's memory local.
 
 ## Lecture 6.4 — Putting the day together
 
 A request from a core: AXI or CHI at the core → packets on the NoC → possibly UCIe to another die → NoC again → memory controller (AXI/CHI port) → DFI → PHY → HBM. Every arrow is a queue with a latency and a bandwidth, and an end-to-end performance model is just these queues in series with the DRAM model you already built at the end.
+
+```mermaid
+flowchart LR
+    subgraph D1["Compute die"]
+        C["Core<br/>AXI or CHI"] --> N1["NoC<br/>packets, hops"] --> U1["UCIe<br/>adapter + PHY"]
+    end
+    subgraph D2["Memory / I-O die"]
+        U2["UCIe<br/>PHY + adapter"] --> N2["NoC"] --> MC["Memory controller<br/>AXI / CHI port"] --> DFI["DFI"] --> PHY["DRAM PHY"] --> H["HBM"]
+    end
+    U1 -- "package wires" --> U2
+    style MC fill:#fff3cd
+    style H fill:#d9f2d9
+```
+
+The response walks the same chain backwards, so every die crossing and every NoC hop is paid twice per request.
 
 ## Lecture 6.5 — AXI signal reference
 
@@ -98,6 +214,20 @@ What you will see in an RTL port list or a waveform. Prefix per channel: AW (wri
 
 **What reaches DRAM.** A read miss that hits a dirty copy elsewhere is served cache-to-cache (**forwarding**) and never touches memory, though the home may write the dirty line back (**write-back on forward**, policy-dependent). An **evict** of a dirty line produces a memory write; a clean evict produces nothing (or a **clean evict notification** to update the snoop filter). The upshot: memory write traffic is dominated by dirty evictions, read traffic by LLC misses, and both are shaped by cache sizes and the forwarding policy. A trace captured at the core's L1 overestimates DRAM traffic by the LLC hit rate and the forwarding rate.
 
+```mermaid
+flowchart TD
+    RD["Read miss reaches<br/>the home node"] --> Q1{"Does another cache<br/>hold the line dirty?"}
+    Q1 -- yes --> FWD["<b>forwarded cache to cache</b><br/>DRAM sees nothing<br/><i>maybe a write-back later</i>"]
+    Q1 -- no --> MEM["<b>DRAM read</b><br/>via the SN-F"]
+    EV["Line evicted<br/>from a cache"] --> Q2{"Dirty?"}
+    Q2 -- yes --> WB["<b>DRAM write</b><br/>write-back"]
+    Q2 -- no --> NONE["nothing reaches DRAM<br/><i>maybe a clean-evict notice<br/>to the snoop filter</i>"]
+    style FWD fill:#d9f2d9
+    style NONE fill:#d9f2d9
+    style MEM fill:#fff3cd
+    style WB fill:#fff3cd
+```
+
 **ACE in one paragraph.** AXI plus three snoop channels (AC address, CR response, CD data) and extended transaction types (ReadShared, ReadUnique, CleanInvalid, WriteBack...). A cache in an ACE system is a manager on AXI and a subordinate on the snoop channels. ACE-Lite is for I/O-coherent devices that do not cache.
 
 **CHI in one page.**
@@ -146,6 +276,15 @@ A two-chiplet AI SoC: compute die (64 tiles on an 8×8 mesh, CHI, system cache 6
 - **Bandwidth**: 4 stacks × 1.2 TB/s = 4.8 TB/s available; 8 UCIe modules × 256 GB/s = 2 TB/s per direction across the die boundary. **The UCIe link, not HBM, is the ceiling** — a common finding, and the reason designs place HBM controllers on the compute die or use more modules.
 - **Outstanding requests** needed to saturate 2 TB/s at 250 ns: 500 KB in flight ≈ 8,000 lines; the HN-F trackers and UCIe credits must allow it, or bandwidth is latency-bound.
 
+The remote-miss budget as a chain; only the yellow box is the DRAM model you built:
+
+```mermaid
+flowchart LR
+    A["4 NoC hops<br/>to the die edge<br/>10 ns"] --> B["UCIe crossing<br/>with retry<br/>15 ns"] --> C["2 NoC hops<br/>on the I-O die<br/>5 ns"] --> D["controller + PHY<br/>+ HBM miss<br/>50 ns"] --> E["return path<br/>30 ns"] --> F["<b>≈ 110 ns unloaded</b><br/>200–300 ns loaded"]
+    style D fill:#fff3cd
+    style F fill:#dbe9ff
+```
+
 Writing this paragraph for a customer's proposed floorplan, with the three bottleneck numbers, is a typical first-month task for a system modeling engineer at an IP company.
 
 ## Practice 6 — Questions
@@ -160,6 +299,25 @@ Writing this paragraph for a customer's proposed floorplan, with the three bottl
 ## Build 6 — Exercise 3, part 2: virtual channels and hotspot traffic
 
 **1. Add a second VC.** In `mesh.py` make `inbuf` a dict of lists of deques: `self.inbuf = {d: [deque() for _ in range(N_VC)] for d in DIRS}` and credits per (port, vc). On injection, assign packets to VC 0 or 1 alternately (or by packet ID parity). In `step()`, scan every (port, vc) head flit, so a blocked packet in VC 0 no longer stops VC 1 from proceeding. Keep the one-flit-per-output-port-per-cycle rule — that is the crossbar. Keep all flits of one packet in the same VC along the whole path (store the chosen VC in the Flit).
+
+What one input port looks like after the change:
+
+```mermaid
+flowchart LR
+    subgraph IN["one input port, one physical link"]
+        V0["VC 0 deque<br/>head flit <b>blocked</b><br/>credits for VC 0 = 0"]
+        V1["VC 1 deque<br/>head flit ready<br/>credits for VC 1 = 3"]
+    end
+    X["Crossbar<br/><i>one flit per output port per cycle</i>"]
+    O["Output link<br/>flit keeps its VC id<br/>downstream returns a credit for that VC"]
+    V0 -. "waits" .-> X
+    V1 -- "wins this cycle" --> X
+    X --> O
+    style V0 fill:#f8d7d7
+    style V1 fill:#d9f2d9
+```
+
+With one VC the blocked head of VC 0 would have idled the whole link; with two, the link stays busy and the saturation point moves right.
 
 **2. Add traffic patterns.** Give `Mesh` a `pattern` argument:
 

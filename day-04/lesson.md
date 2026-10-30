@@ -14,6 +14,18 @@ It holds for any arrival pattern and any service discipline, as long as the syst
 - **Size a queue.** A controller must sustain 19 GB/s = 0.3 requests per ns with 100 ns average latency. It needs to hold λW = 30 requests in flight; a 16-entry queue caps bandwidth at 16/100 ns × 64 B = 10 GB/s no matter how fast the DRAM is. This is the single most common reason a memory system underperforms: not enough **outstanding requests** (requests in flight at once).
 - **Reason about latency.** If a core allows 10 outstanding misses and DRAM latency is 100 ns, that core can pull at most 10 × 64 B / 100 ns = 6.4 GB/s however much the memory could supply. Bandwidth-per-core is latency-bound, which is why CPUs add bigger miss queues and prefetchers.
 
+The queue-sizing example as a picture:
+
+```mermaid
+flowchart LR
+    IN["arrivals<br/>λ = 0.3 requests per ns<br/><i>19 GB/s of 64 B lines</i>"] --> SYS["inside the controller<br/><b>L = λ × W = 0.3 × 100 = 30</b><br/>requests in flight"] --> OUT["departures<br/>each one after<br/>W = 100 ns"]
+    SYS -.-> CAP["only 16 entries?<br/>16 ÷ 100 ns × 64 B = <b>10 GB/s</b><br/><i>whatever the DRAM could do</i>"]
+    style SYS fill:#dbe9ff
+    style CAP fill:#f8d7d7
+```
+
+Fix any two of the three and the third follows; a queue that is too small caps λ, not W.
+
 ## Lecture 4.2 — Bandwidth-bound or latency-bound?
 
 Every workload is limited by one of two things:
@@ -22,6 +34,16 @@ Every workload is limited by one of two things:
 - **Bandwidth-bound**: many independent requests are available (streaming, matrix multiply, image processing). Throughput = bytes per second the pipe can carry. More channels, wider buses, better scheduling help; shaving 5 ns off tCL barely matters.
 
 The tell: does performance improve when you add outstanding requests? If yes, it was latency-bound and you just converted it. A performance architect's first question about any customer workload is which of these it is, because the right IP configuration differs completely.
+
+```mermaid
+flowchart TD
+    Q{"Add outstanding requests.<br/>Does throughput rise?"} -- yes --> LAT["<b>latency-bound</b><br/>dependent loads, pointer chasing<br/>throughput = 1 ÷ latency"]
+    Q -- no --> BW["<b>bandwidth-bound</b><br/>streaming, GEMM, image kernels<br/>throughput = bytes the pipe carries"]
+    LAT --> LF["helps: faster tCL and tRCD, prefetch, bigger miss queue<br/>does not help: more channels"]
+    BW --> BF["helps: more channels, wider bus, scheduling<br/>barely helps: 5 ns off tCL"]
+    style LAT fill:#fff3cd
+    style BW fill:#dbe9ff
+```
 
 ## Lecture 4.3 — The roofline model
 
@@ -33,19 +55,73 @@ Plotted on log axes with I on the x-axis, this is a flat roof at P and a sloped 
 
 Worked example, an AI accelerator with P = 1000 TFLOP/s and eight HBM3E stacks B = 9.8 TB/s: ridge point ≈ 102 FLOP per byte. A large matrix multiply has intensity in the hundreds (each loaded value is reused many times), so it is compute-bound; a vector add has intensity 1/12 (two loads, one store per add in FP32), so it reaches only 9.8 TB/s × 1/12 ≈ 0.8 TFLOP/s, under 0.1 % of peak. This is why AI chips chase HBM bandwidth and why a memory architect's work shows up directly in model training speed.
 
+The same roofline as a decision tree, with the accelerator's numbers:
+
+```mermaid
+flowchart TD
+    I["arithmetic intensity<br/>I = ops ÷ bytes moved"] --> Q{"I below the ridge point<br/>P ÷ B ≈ 102 FLOP/B?"}
+    Q -- "yes, memory-bound" --> MEM["attainable = B × I<br/>vector add, I = 1/12<br/>9.8 TB/s × 1/12 ≈ <b>0.8 TFLOP/s</b>"]
+    Q -- "no, compute-bound" --> CMP["attainable = P<br/>large GEMM, I in the hundreds<br/><b>1000 TFLOP/s</b>"]
+    MEM --> MF["lever: bandwidth<br/>more HBM stacks, more data reuse"]
+    CMP --> CF["lever: compute<br/>more MACs, higher clock"]
+    style MEM fill:#f8d7d7
+    style CMP fill:#d9f2d9
+```
+
 Use it the other way round too: if a customer's kernel sits at intensity 50 and they ask for a faster compute die, the roofline says they need bandwidth, not FLOPs.
 
 ## Lecture 4.4 — Tail latency and percentiles
 
 The average hides the shape. If 99 requests take 100 ns and one takes 10 µs (it hit a refresh and a write drain), the average is 199 ns — misleading in both directions. Report a **histogram** and **percentiles**: p50 (median), p95, p99, p99.9. The high percentiles are the **tail**, and the tail is what a user or a real-time deadline experiences.
 
+```mermaid
+flowchart LR
+    S["100 requests<br/>sorted by latency"] --> P50["p50<br/>100 ns<br/><i>the typical request</i>"] --> P99["p99<br/>still 100 ns"] --> MAX["p99.9 and max<br/><b>10 µs</b><br/>refresh + write drain"]
+    S -.-> AVG["average 199 ns<br/><i>matches none of them</i>"]
+    style MAX fill:#f8d7d7
+    style AVG fill:#fff3cd
+```
+
+The tail is one bin wide here, but it is the bin where a deadline is missed; report the histogram, not the mean.
+
 In memory systems the tail comes from a few known sources: refresh (tRFC), write-queue drains, row conflicts under FR-FCFS starvation, and queueing when arrival rate approaches capacity. Queueing theory gives the shape: as utilization ρ = λ ÷ capacity approaches 1, average wait grows like ρ ÷ (1 − ρ). At 50 % utilization the wait is one service time; at 90 % it is nine; at 99 % it is ninety-nine. That is the hockey-stick you saw in yesterday's latency-vs-arrival plot, and the reason systems are sized to run at 60–80 % utilization.
 
+The hockey stick as regimes, in units of one service time:
+
+```mermaid
+flowchart LR
+    A["<b>idle</b><br/>ρ ≈ 0.1<br/>wait ≈ 0<br/>latency = unloaded"] --> B["<b>linear</b><br/>ρ = 0.5<br/>wait = 1 service time"] --> C["<b>knee</b><br/>ρ = 0.8 to 0.9<br/>wait = 4 to 9 service times<br/><i>size systems to stop here</i>"] --> D["<b>saturated</b><br/>ρ → 1<br/>wait = 99+ service times<br/>queue grows without bound"]
+    style A fill:#d9f2d9
+    style C fill:#fff3cd
+    style D fill:#f8d7d7
+```
+
 **Utilization** itself is the simplest metric: fraction of cycles the data bus (or any resource) is busy. A controller at 95 % bus utilization has nothing left to give; one at 40 % with high latency is being starved by something upstream.
+
+The two numbers together make a diagnosis flow:
+
+```mermaid
+flowchart TD
+    Q1{"bus utilization<br/>above 90 %?"} -- yes --> SAT["<b>the channel is the bottleneck</b><br/>nothing left to give<br/>fix: more channels, wider bus,<br/>higher row-hit rate"]
+    Q1 -- no --> Q2{"latency high<br/>anyway?"}
+    Q2 -- yes --> UP["<b>starved upstream</b><br/>too few outstanding requests,<br/>NoC or cache stalling<br/>fix: MSHRs, credits, prefetch"]
+    Q2 -- no --> OK["<b>headroom</b><br/>neither resource stressed"]
+    style SAT fill:#f8d7d7
+    style UP fill:#fff3cd
+    style OK fill:#d9f2d9
+```
 
 ## Lecture 4.5 — Amdahl's law
 
 If a fraction f of total time is spent in one part and you speed that part up by s, the overall speedup is 1 ÷ ((1 − f) + f ÷ s). Memory latency is 40 % of runtime and you halve it: 1 ÷ (0.6 + 0.2) = 1.25×, not 2×. Use this before promising anyone what a faster memory controller will do for their application.
+
+```mermaid
+flowchart LR
+    B0["before<br/>other work 60<br/>memory stalls 40<br/>total 100"] -- "halve memory latency, s = 2" --> A0["after<br/>other work 60<br/>memory stalls 20<br/>total 80"] --> SP["speedup<br/>100 ÷ 80 = <b>1.25×</b><br/>not 2×"]
+    style SP fill:#fff3cd
+```
+
+The 60 you did not touch sets the ceiling: even infinitely fast memory gives only 1 ÷ 0.6 = 1.67×.
 
 ## Lecture 4.6 — Queueing theory you can use without a textbook
 
@@ -60,6 +136,15 @@ If a fraction f of total time is spent in one part and you speed that part up by
 **Multiple servers.** With c servers (banks, channels) the queue wait falls roughly as ρ^(√(2(c+1)) − 1) for the same ρ — more banks help far more than linearly at moderate load. This is why 32 banks and 16 pseudo-channels are not overkill.
 
 **Closed systems.** A core with N MSHRs is a **closed** queueing network: at most N requests circulate; throughput X = N/(R + Z), where R is memory response time and Z is the think time between requests. As N grows, X rises until the bottleneck (the bus) saturates, then R grows instead — the bandwidth-delay relationship from Lecture 4.1, now with a formula. Plotting X and R against N is the standard way to characterize a memory system's capacity.
+
+```mermaid
+flowchart LR
+    CORE["core<br/>N MSHRs, so at most N<br/>requests circulating"] -- "issue" --> MEM["memory<br/>response time R"]
+    MEM -- "data returns" --> THINK["think time Z<br/>before the next request"]
+    THINK --> CORE
+    X["throughput X = N ÷ (R + Z)<br/>small N: X grows with N<br/>past saturation: R grows instead"]
+    style MEM fill:#dbe9ff
+```
 
 **Bandwidth–delay product.** To keep a pipe of bandwidth B busy at latency L you need B × L bytes in flight. 1.2 TB/s × 300 ns loaded latency = 360 KB = 5,600 outstanding 64 B lines across an HBM3E stack. That number sizes queues, MSHRs, NoC buffers and reorder buffers end to end, and it is the first calculation to do for any new memory system.
 
@@ -148,6 +233,19 @@ if self.dma_count >= DMA_CAP_PER_WINDOW:
     cands = [r for r in cands if r.src == 0] or cands
 # ... then FR-FCFS among cands; after choosing, if chosen.src == 1: self.dma_count += 1
 ```
+
+What the two knobs do to the candidate list before FR-FCFS sees it:
+
+```mermaid
+flowchart LR
+    CPU["src 0: CPU<br/>1 request per 40 cycles<br/>locality 0.5<br/><i>latency-sensitive</i>"] --> Q["shared queue"]
+    DMA["src 1: DMA<br/>1 request per 4 cycles<br/>sequential<br/><i>bandwidth-hungry</i>"] --> Q
+    Q --> F1["knob 1, PRIO_FIRST<br/>any src 0 ready?<br/>then drop src 1 candidates"] --> F2["knob 2, DMA_CAP_PER_WINDOW<br/>40 DMA picks per 256 cycles,<br/>then src 0 only"] --> FR["FR-FCFS<br/>among what is left"] --> DRAM["DRAM<br/>one bus"]
+    style CPU fill:#dbe9ff
+    style DMA fill:#fff3cd
+```
+
+Knob 1 protects CPU latency at the price of DMA bandwidth; knob 2 caps the DMA instead, so the CPU finds slack without being strictly first.
 
 **Measurement**: keep latencies per source; compute p50/p95/p99 with `numpy.percentile`; plot two histograms side by side (`plt.hist(..., bins=60, alpha=0.6)`) on a log x-axis.
 

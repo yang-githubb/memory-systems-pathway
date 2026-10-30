@@ -56,6 +56,15 @@ Cells are organized in a hierarchy. Read the table top-down: each level contains
 | Row (page) | one horizontal line of cells | 64K–128K per bank | one row at a time can sit in the row buffer |
 | Column | one word position inside the row | 1–2 KB of data per row per chip | the thing you actually read |
 
+```mermaid
+flowchart TD
+    CH["Channel<br/><i>own wires, own controller: full parallelism</i>"] --> RK["Rank<br/><i>chips answering together; share the wires</i>"]
+    RK --> BG["Bank group ×8<br/><i>same-group back-to-back is slower (tCCD_L)</i>"]
+    BG --> BK["Bank ×4 per group<br/><i>own row buffer: the unit of parallelism</i>"]
+    BK --> RW["Row ×64K–128K<br/><i>one open at a time, in the row buffer</i>"]
+    RW --> CL["Column<br/><i>the 64-byte burst you actually read</i>"]
+```
+
 An **address** is just a number. The controller slices its bits into these fields. A typical slicing for a 64-byte cache line on one channel:
 
 ```
@@ -64,6 +73,14 @@ bits 16..14  bank group (8)
 bits 13..12  bank       (4)
 bits 11..6   column     (64 cache lines per 4 KB row across the rank)
 bits  5..0   byte inside the 64-byte line (not sent to DRAM)
+```
+
+The same slicing as a picture, high bits on the left. Only the fields with arrows are sent to DRAM:
+
+```mermaid
+flowchart LR
+    R["row<br/>bits 35..17"] --- BG["bank group<br/>bits 16..14"] --- B["bank<br/>bits 13..12"] --- C["column<br/>bits 11..6"] --- O["byte in line<br/>bits 5..0<br/><i>not sent</i>"]
+    style O stroke-dasharray: 4 4
 ```
 
 The choice of which bits go where is called **address mapping**, and it is a real design knob: putting bank bits *below* row bits means consecutive addresses spread across banks (good for parallelism); putting them above means consecutive addresses stay in one row (good for row-buffer hits). Your exercise today decodes addresses; on Day 3 you will see the mapping change your bandwidth.
@@ -77,6 +94,16 @@ Every read ends up as one of three cases. The numbers use DDR5-4800 (clock 2.4 G
 | Row-buffer **hit** | the wanted row is already open | READ | tCL ≈ 16 ns |
 | Row-buffer **miss** (bank closed) | no row open | ACTIVATE, then READ | tRCD + tCL ≈ 32 ns |
 | Row-buffer **conflict** | a *different* row is open | PRECHARGE, ACTIVATE, READ | tRP + tRCD + tCL ≈ 48 ns |
+
+```mermaid
+flowchart TD
+    Q1{"Is a row open<br/>in this bank?"} -- no --> MISS["<b>miss</b><br/>ACTIVATE → READ<br/>tRCD + tCL ≈ 32 ns"]
+    Q1 -- yes --> Q2{"Is it the<br/>row I want?"}
+    Q2 -- yes --> HIT["<b>hit</b><br/>READ<br/>tCL ≈ 16 ns"]
+    Q2 -- no --> CONF["<b>conflict</b><br/>PRECHARGE → ACTIVATE → READ<br/>tRP + tRCD + tCL ≈ 48 ns"]
+    style HIT fill:#d9f2d9
+    style CONF fill:#f8d7d7
+```
 
 So a conflict costs three times a hit. Sequential traffic (reading an array in order) stays in one row for 1–2 KB and gets hits; random traffic (pointer chasing, hash tables) gets conflicts nearly every time. The **row-hit rate** — hits ÷ all accesses — is the first number to look at when a memory system is slow, and the controller's scheduling policy (Day 3) exists largely to raise it.
 
@@ -92,6 +119,15 @@ A memory controller only ever sees cache **misses**. To predict its traffic you 
 **Lines, sets and ways.** A cache stores data in **lines** (64 bytes on nearly every modern CPU; 128 on some Arm servers and GPUs). The address is split into **tag | set index | byte offset**. The set index picks one of S sets; within a set there are W **ways** (slots), and the tag identifies which line occupies a slot. A cache with S = 1024 sets and W = 8 ways holds 1024 × 8 × 64 B = 512 KB. **Direct-mapped** (W = 1) is fastest but suffers **conflict misses** when two hot lines map to the same set; **fully associative** (S = 1) never conflicts but is slow to search; 4–16 ways is the usual compromise.
 
 **The three Cs of misses.** **Compulsory** (first touch of a line — only prefetching helps), **capacity** (the working set is bigger than the cache — only a bigger cache or better locality helps), **conflict** (two lines fight for one set — more ways or a better index hash helps). When a customer says "our workload misses a lot", the first question is which kind, because the fix is different for each.
+
+```mermaid
+flowchart TD
+    M["A line missed. Why?"] --> Q1{"First time this line<br/>was ever touched?"}
+    Q1 -- yes --> COMP["<b>compulsory</b><br/>fix: prefetch"]
+    Q1 -- no --> Q2{"Would it fit if the cache<br/>were fully associative?"}
+    Q2 -- no --> CAP["<b>capacity</b><br/>fix: bigger cache, better locality"]
+    Q2 -- yes --> CONF["<b>conflict</b><br/>fix: more ways, better index hash"]
+```
 
 **Write policy.** **Write-back** caches hold modified (**dirty**) lines and write them to memory only on eviction; the controller therefore sees writes in bursts when a working set is replaced. **Write-through** sends every store to memory — rare today except for some L1s. **Write-allocate** fetches the line on a store miss (so a store becomes a read then a write; the read is called a **read-for-ownership**, RFO); **no-write-allocate** sends the store straight through. Streaming stores (non-temporal) bypass the cache and show up as full-line writes without an RFO.
 
@@ -110,6 +146,16 @@ Programs use **virtual addresses**; the memory system uses **physical addresses*
 1. A program that walks a large array sequentially in virtual space touches physical frames that may be anywhere. Within a 4 KB page addresses are contiguous (so row-buffer hits inside a page are preserved — a 4 KB page spans half of an 8 KB row), but each page boundary can jump to any row of any bank. With 2 MB **huge pages** the contiguity extends to 2 MB and row-hit rates rise visibly; benchmarking teams enable huge pages for exactly this reason.
 2. A **TLB miss** triggers a **page-table walk**: up to four or five dependent memory reads (one per level of the radix page table) before the actual data read. Those walk reads are themselves memory requests your controller must serve, latency-critical and random. On a workload with a huge working set (databases, graph analytics) page walks can be 10–20 % of DRAM traffic.
 
+```mermaid
+flowchart TB
+    V0["virtual page 0"] --> F0["frame 17<br/>bank 3, row 902"]
+    V1["virtual page 1"] --> F1["frame 4<br/>bank 0, row 211"]
+    V2["virtual page 2"] --> F2["frame 41<br/>bank 6, row 2177"]
+    V3["virtual page 3"] --> F3["frame 5<br/>bank 0, row 264"]
+```
+
+Inside each 4 KB page the addresses stay contiguous (row-buffer hits survive); every page boundary is a jump to anywhere. Huge pages stretch the contiguous run to 2 MB.
+
 Accelerators either use an **IOMMU/SMMU** (their own translation unit, with the same effects) or operate on physically contiguous buffers that the driver pins. When a customer's trace comes from a GPU, ask which.
 
 ## Lecture 1.6 — Inside the DRAM array: cell, bitline, sense amplifier
@@ -125,6 +171,15 @@ A deeper look at the physics, because several timing parameters come straight fr
 3. Charge sharing: a charged cell nudges its bitline up by a few tens of millivolts; a discharged cell nudges it down. The bitline capacitance is 10–20× the cell's, which is why the swing is tiny.
 4. The **sense amplifier** (a cross-coupled latch, one per bitline) detects the direction of the nudge and amplifies it to full rail: the bitline is driven to VDD or 0.
 5. Because the cell is still connected, the amplified bitline **restores** the cell's charge — this is the write-back that makes the destructive read safe. Restoration takes time; the row may not be closed until it finishes. That minimum open time is **tRAS**.
+
+```mermaid
+flowchart LR
+    PRE["bitlines at VDD/2<br/><i>precharged, floating</i>"] -- "ACTIVATE:<br/>wordline up" --> SHARE["charge sharing<br/><i>tiny swing on bitline</i>"]
+    SHARE --> SENSE["sense amps latch<br/>to full rail<br/><b>= row buffer</b>"]
+    SENSE -- "READ allowed<br/>after <b>tRCD</b>" --> RD["column READ<br/><i>select 64 B of latches</i>"]
+    SENSE --> REST["restore cell charge<br/><i>row may close after <b>tRAS</b></i>"]
+    REST -- "PRECHARGE:<br/>wordline down,<br/>takes <b>tRP</b>" --> PRE
+```
 
 The time from wordline rise to the sense amplifiers holding valid data is **tRCD**: it is when a READ can first select columns. The time to drive the bitlines back to VDD/2 after the wordline drops is **tRP**. So tRCD, tRAS and tRP are literally the charge-sharing, restore and precharge times of this circuit, which is why they have barely improved in 20 years (about 13–15 ns each) while bus data rates went from 400 to 9600 MT/s. **The array is slow and analog; the interface is fast and digital.** Every DRAM trick is about hiding the array behind parallelism.
 
@@ -159,6 +214,20 @@ The controller's **address mapper** turns a physical address into (channel, rank
 - **Row–Bank–Column** (bank bits below row bits, above column bits): consecutive rows of a stream land in different banks. A sequential stream opens bank 0 row R, then bank 1 row R, etc.; after all banks it returns to bank 0 with row R+1. Maximizes bank-level parallelism for streams.
 - **Bank–Row–Column** (bank bits above row bits): consecutive rows stay in one bank; a stream walks all rows of bank 0 first. Minimizes activates in some patterns but serializes streams on one bank. Rarely used now.
 
+```mermaid
+flowchart TB
+    subgraph RBC["Row–Bank–Column (usual): next row → next bank"]
+        direction LR
+        R1["row"] --- B1["bank"] --- C1["column"]
+    end
+    subgraph BRC["Bank–Row–Column (rare): next row → same bank"]
+        direction LR
+        B2["bank"] --- R2["row"] --- C2["column"]
+    end
+```
+
+Your `decode()` from Build 1 is Row–Bank–Column; the stretch `decode_row_interleaved()` is Bank–Row–Column. Day 3 measures the difference.
+
 **XOR bank hashing.** Many workloads have strides that are powers of two (matrix columns, structure-of-arrays). A stride of exactly the bank-interleave distance maps every access to the same bank — a **bank conflict pathology**. The fix is to XOR some row bits into the bank bits: bank = bank_bits XOR row_bits[k:k+n]. This costs nothing and spreads power-of-two strides across banks. Nearly every real controller does it; your model should have it as an option because customer traces with regular strides behave very differently with and without it.
 
 **Channel and rank hashing** apply the same idea at higher levels. The configuration is often a table of "which address bits XOR into which field", and a performance architect's job includes choosing it for a customer's address patterns.
@@ -184,6 +253,15 @@ Following one load miss from core to data return, with typical numbers for a ser
 | **Total, unloaded miss** | **about 85–100 ns** |  |
 | **Total, row-buffer hit, unloaded** | **about 70 ns** | tRCD saved |
 | **Total, loaded (queue wait 100 ns)** | **about 200 ns** |  |
+
+The same budget as a chain. Width of text is not to scale; the numbers are:
+
+```mermaid
+flowchart LR
+    A["core + L1/L2<br/>≈ 5 ns"] --> B["LLC + NoC<br/>≈ 25 ns"] --> C["controller<br/>front-end<br/>≈ 3 ns"] --> Q["queue wait<br/><b>0 … 100+ ns</b>"] --> D["DRAM array<br/>ACT + RD<br/>≈ 33 ns"] --> E["burst + PHY<br/>+ return path<br/>≈ 12 ns"] --> F["NoC back<br/>+ cache fill<br/>≈ 15 ns"]
+    style Q fill:#fff3cd
+    style D fill:#dbe9ff
+```
 
 Two observations that recur in every design review: the DRAM array itself is only a third of the unloaded latency (so "faster DRAM" cannot fix most of it), and under load the queue wait dominates everything (so scheduling and queue sizing are what matter). The controller plus PHY contribute roughly 15–20 ns fixed; an IP vendor is measured on that number and on how well the scheduler keeps the queue wait down.
 
