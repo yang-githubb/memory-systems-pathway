@@ -2,8 +2,8 @@
 
 Spec and starter code: `lessons/day-01-*.md` (Build 1), `day-02-*.md` (Build 2), `day-03-*.md` (Build 3).
 
-Files to create here: `model.py` (Request, decode, streams), `config.py` or load from `../../configs/`, `sim.py` (Bank, Controller, run_stream), `sweep.py`, `test_decode.py`, `test_timing.py`.
-Plots expected: `ex1_bw_vs_hitrate.png`, `ex1_latency_vs_depth.png` (saved under `results/`).
+Files to create here: `model.py` (Request, decode, streams), `config.py` or load from `../configs/`, `sim.py` (Bank, Controller, run_stream), `sweep.py`, `test_decode.py`, `test_timing.py`.
+Plots expected: `ex1_bw_vs_hitrate.png`, `ex1_latency_vs_depth.png` (git-ignored).
 
 ## Day 1 — done
 

@@ -37,10 +37,7 @@ exercises/           my implementations of the builds (filled in as I go)
   ex5_ramulator/         notes and configs for the Ramulator 2 runs (day 8)
   ex7_gui/               PySide explorer GUI (day 10)
   ex8_cpp/               C++17 port of exercise 1 (day 9)
-configs/             YAML timing/organization configs shared by the simulators
-tools/               CLI entry points
-tests/               pytest and Catch2 tests, including the calibration test
-results/             generated plots and CSVs (git-ignored)
+  configs/               YAML timing/organization configs shared by the simulators
 ```
 
 ## Setup
@@ -59,4 +56,4 @@ The timing numbers are typical datasheet values rounded for teaching (DDR5-4800,
 
 ## License
 
-Text and notes: CC BY 4.0. Code in `exercises/`, `tools/` and `tests/`: MIT.
+Text and notes: CC BY 4.0. Code in `exercises/`: MIT.
